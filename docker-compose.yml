@@ -1,0 +1,33 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: proxy_control_app
+      POSTGRES_PASSWORD: change-me
+      POSTGRES_DB: proxy_control
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U proxy_control_app -d proxy_control"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PCP_DATABASE_URL: postgresql+psycopg://proxy_control_app:change-me@postgres:5432/proxy_control
+      PCP_ADMIN_EMAIL: admin@example.com
+      PCP_ADMIN_PASSWORD: change-me-admin-password
+      PCP_SECRET_KEY: change-me-with-openssl-rand-base64-32
+    ports:
+      - "127.0.0.1:8000:8000"
+
+volumes:
+  postgres-data:
+
