@@ -28,7 +28,7 @@ fmt:
 	gofmt -w ./cmd ./internal
 
 docker-build:
-	docker build -t proxy-control-plane:local .
+	docker build -t proxy-control-plane_api:local .
 
 docker-up: init-local
 	docker compose up --build

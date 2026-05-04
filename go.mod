@@ -1,4 +1,4 @@
-module github.com/ziyan/proxy-control-plane
+module github.com/ziyan-c/proxy-control-plane
 
 go 1.26
 

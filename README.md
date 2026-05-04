@@ -55,6 +55,14 @@ The current `docker-compose.yml` starts two services:
   traffic, and audit data
 - `api`: the Go backend API service, used for admin APIs and subscription APIs
 
+Docker resources are explicitly prefixed to avoid name collisions:
+
+- Project name: `proxy-control-plane`
+- API container: `proxy-control-plane_api`
+- PostgreSQL container: `proxy-control-plane_postgres`
+- PostgreSQL volume: `proxy-control-plane_postgres-data`
+- Network: `proxy-control-plane_network`
+
 Default ports:
 
 - PostgreSQL: `127.0.0.1:5432`

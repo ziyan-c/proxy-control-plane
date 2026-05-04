@@ -8,11 +8,11 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/ziyan/proxy-control-plane/internal/config"
-	"github.com/ziyan/proxy-control-plane/internal/domain"
-	"github.com/ziyan/proxy-control-plane/internal/security"
-	"github.com/ziyan/proxy-control-plane/internal/store"
-	"github.com/ziyan/proxy-control-plane/internal/subscription"
+	"github.com/ziyan-c/proxy-control-plane/internal/config"
+	"github.com/ziyan-c/proxy-control-plane/internal/domain"
+	"github.com/ziyan-c/proxy-control-plane/internal/security"
+	"github.com/ziyan-c/proxy-control-plane/internal/store"
+	"github.com/ziyan-c/proxy-control-plane/internal/subscription"
 )
 
 type Server struct {

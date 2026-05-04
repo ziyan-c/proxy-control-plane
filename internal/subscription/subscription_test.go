@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ziyan/proxy-control-plane/internal/domain"
+	"github.com/ziyan-c/proxy-control-plane/internal/domain"
 )
 
 func TestBuildVLESSSubscription(t *testing.T) {

@@ -6,8 +6,8 @@ import (
 	"errors"
 	"time"
 
-	"github.com/ziyan/proxy-control-plane/internal/domain"
-	"github.com/ziyan/proxy-control-plane/internal/security"
+	"github.com/ziyan-c/proxy-control-plane/internal/domain"
+	"github.com/ziyan-c/proxy-control-plane/internal/security"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )

@@ -47,6 +47,14 @@ CI/CD、Ansible、Terraform 或其他运维系统负责。
 - `postgres`：PostgreSQL 17 数据库，保存客户、节点、账号、订阅、流量和审计数据
 - `api`：Go 后端 API 服务，提供管理接口和订阅接口
 
+Docker 资源会显式加项目前缀，避免和其他项目重名：
+
+- 项目名：`proxy-control-plane`
+- API 容器：`proxy-control-plane_api`
+- PostgreSQL 容器：`proxy-control-plane_postgres`
+- PostgreSQL 数据卷：`proxy-control-plane_postgres-data`
+- 网络：`proxy-control-plane_network`
+
 默认端口：
 
 - PostgreSQL：`127.0.0.1:5432`

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ziyan/proxy-control-plane/internal/domain"
+	"github.com/ziyan-c/proxy-control-plane/internal/domain"
 )
 
 func Build(customer domain.Customer, accounts []domain.ProxyAccount, fmt string, now time.Time) string {
