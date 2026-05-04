@@ -1,13 +1,9 @@
-__pycache__/
-*.py[cod]
-*.egg-info/
-.coverage
-.pytest_cache/
-.ruff_cache/
-.mypy_cache/
 .venv/
 venv/
 .env
 *.db
 dist/
 build/
+coverage.out
+proxy-control-plane
+server

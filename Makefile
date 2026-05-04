@@ -1,20 +1,22 @@
-.PHONY: install test run migrate revision docker-build
+.PHONY: test run migrate build tidy fmt docker-build
 
-install:
-	python -m pip install -e ".[dev]"
+build:
+	go build ./cmd/server
 
 test:
-	pytest
+	go test ./...
 
 run:
-	uvicorn proxy_control_plane.main:app --reload
+	go run ./cmd/server serve
 
 migrate:
-	alembic upgrade head
+	go run ./cmd/server migrate
 
-revision:
-	alembic revision --autogenerate -m "$(m)"
+tidy:
+	go mod tidy
+
+fmt:
+	gofmt -w ./cmd ./internal
 
 docker-build:
 	docker build -t proxy-control-plane:local .
-

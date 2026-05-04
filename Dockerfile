@@ -1,17 +1,23 @@
-FROM python:3.12-slim
+FROM golang:1.26-alpine AS build
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+WORKDIR /src
+
+COPY go.mod go.sum* ./
+RUN go mod download
+
+COPY cmd ./cmd
+COPY internal ./internal
+
+RUN CGO_ENABLED=0 GOOS=linux go build -o /out/proxy-control-plane ./cmd/server
+
+FROM alpine:3.22
+
+RUN addgroup -S app && adduser -S app -G app
 
 WORKDIR /app
+COPY --from=build /out/proxy-control-plane /app/proxy-control-plane
 
-COPY pyproject.toml README.md alembic.ini ./
-COPY alembic ./alembic
-COPY src ./src
-
-RUN pip install --no-cache-dir .
-
+USER app
 EXPOSE 8000
 
-CMD ["sh", "-c", "alembic upgrade head && uvicorn proxy_control_plane.main:app --host 0.0.0.0 --port 8000"]
-
+CMD ["/app/proxy-control-plane", "serve"]
