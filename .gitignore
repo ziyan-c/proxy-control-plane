@@ -1,10 +1,8 @@
-.venv/
-venv/
 .env
-.local/*.env
+.local/
 *.db
 dist/
 build/
 coverage.out
-proxy-control-plane
-server
+/proxy-control-plane
+/server

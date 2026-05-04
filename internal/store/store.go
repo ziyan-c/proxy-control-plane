@@ -2,10 +2,15 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/ziyan-c/proxy-control-plane/internal/domain"
 	"github.com/ziyan-c/proxy-control-plane/internal/security"
 	"gorm.io/driver/postgres"
@@ -21,7 +26,28 @@ type Store struct {
 	db *gorm.DB
 }
 
-func Open(ctx context.Context, databaseURL string) (*Store, error) {
+func Open(ctx context.Context, databaseURL string, autoCreateDatabase bool) (*Store, error) {
+	db, err := openGorm(ctx, databaseURL)
+	if err == nil {
+		return &Store{db: db}, nil
+	}
+
+	if !autoCreateDatabase {
+		return nil, err
+	}
+
+	if createErr := ensureDatabase(ctx, databaseURL); createErr != nil {
+		return nil, fmt.Errorf("connect database: %w; auto-create database: %w", err, createErr)
+	}
+
+	db, err = openGorm(ctx, databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	return &Store{db: db}, nil
+}
+
+func openGorm(ctx context.Context, databaseURL string) (*gorm.DB, error) {
 	db, err := gorm.Open(postgres.Open(databaseURL), &gorm.Config{
 		TranslateError: true,
 	})
@@ -41,7 +67,56 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 		return nil, err
 	}
 
-	return &Store{db: db}, nil
+	return db, nil
+}
+
+func ensureDatabase(ctx context.Context, databaseURL string) error {
+	targetDatabase, maintenanceURL, err := maintenanceDatabaseURL(databaseURL)
+	if err != nil {
+		return err
+	}
+	if targetDatabase == "" || targetDatabase == "postgres" {
+		return nil
+	}
+
+	db, err := sql.Open("pgx", maintenanceURL)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	if err := db.PingContext(ctx); err != nil {
+		return err
+	}
+
+	var exists bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)`, targetDatabase).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+
+	_, err = db.ExecContext(ctx, `CREATE DATABASE `+quoteIdentifier(targetDatabase))
+	return err
+}
+
+func maintenanceDatabaseURL(databaseURL string) (string, string, error) {
+	parsed, err := url.Parse(databaseURL)
+	if err != nil {
+		return "", "", err
+	}
+	targetDatabase, err := url.PathUnescape(strings.TrimPrefix(parsed.EscapedPath(), "/"))
+	if err != nil {
+		return "", "", err
+	}
+	parsed.Path = "/postgres"
+	parsed.RawPath = ""
+	return targetDatabase, parsed.String(), nil
+}
+
+func quoteIdentifier(value string) string {
+	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
 }
 
 func (s *Store) Close() error {

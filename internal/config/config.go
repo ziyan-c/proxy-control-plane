@@ -16,6 +16,7 @@ type Config struct {
 	AdminPassword            string
 	SecretKey                string
 	AccessTokenExpireMinutes int
+	AutoCreateDatabase       bool
 	AutoMigrate              bool
 }
 
@@ -23,12 +24,13 @@ func Load() Config {
 	return Config{
 		AppName:                  getEnv("PCP_APP_NAME", "proxy-control-plane"),
 		Environment:              getEnv("PCP_ENVIRONMENT", "local"),
-		ListenAddr:               getEnv("PCP_LISTEN_ADDR", ":8000"),
+		ListenAddr:               getEnv("PCP_LISTEN_ADDR", ":9710"),
 		DatabaseURL:              normalizeDatabaseURL(getEnv("PCP_DATABASE_URL", "postgres://proxy_control_app:change-me@127.0.0.1:5432/proxy_control?sslmode=disable")),
 		AdminEmail:               getEnv("PCP_ADMIN_EMAIL", "admin@example.com"),
 		AdminPassword:            getEnv("PCP_ADMIN_PASSWORD", "change-me-admin-password"),
 		SecretKey:                getEnv("PCP_SECRET_KEY", "change-me-with-openssl-rand-base64-32"),
 		AccessTokenExpireMinutes: getEnvInt("PCP_ACCESS_TOKEN_EXPIRE_MINUTES", 60),
+		AutoCreateDatabase:       getEnvBool("PCP_AUTO_CREATE_DATABASE", true),
 		AutoMigrate:              getEnvBool("PCP_AUTO_MIGRATE", true),
 	}
 }

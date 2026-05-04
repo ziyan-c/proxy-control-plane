@@ -8,7 +8,7 @@ RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
 
-RUN CGO_ENABLED=0 GOOS=linux go build -o /out/proxy-control-plane ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux go build -o /out/proxy-control-plane ./cmd/proxy-control-plane
 
 FROM alpine:3.22
 
@@ -18,6 +18,6 @@ WORKDIR /app
 COPY --from=build /out/proxy-control-plane /app/proxy-control-plane
 
 USER app
-EXPOSE 8000
+EXPOSE 9710
 
-CMD ["/app/proxy-control-plane", "serve"]
+CMD ["/app/proxy-control-plane", "server", "serve", "--no-local-config"]

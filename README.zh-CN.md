@@ -19,6 +19,7 @@
 - 管理代理账号：VLESS UUID、账号标识、启用状态、过期时间、流量上限
 - 管理账号与节点之间的绑定关系
 - 生成和轮换订阅 token，数据库只保存 token 哈希值
+- 在配置允许且数据库用户有权限时，自动创建目标 PostgreSQL database
 - 根据订阅 token 输出 VLESS 订阅内容
 - 支持 `raw` 和 base64 编码的 `v2ray` 订阅格式
 - 记录管理操作审计日志
@@ -42,10 +43,13 @@ CI/CD、Ansible、Terraform 或其他运维系统负责。
 
 ## 部署后会启动什么
 
-当前 `docker-compose.yml` 会启动两个服务：
+`docker-compose.yml` 会启动两个本地服务：
 
 - `postgres`：PostgreSQL 17 数据库，保存客户、节点、账号、订阅、流量和审计数据
 - `api`：Go 后端 API 服务，提供管理接口和订阅接口
+
+`docker-compose.remote-db.yml` 只启动 `api`，并通过 `.local/api.remote.env`
+连接远程 PostgreSQL。
 
 Docker 资源会显式加项目前缀，避免和其他项目重名：
 
@@ -58,13 +62,14 @@ Docker 资源会显式加项目前缀，避免和其他项目重名：
 默认端口：
 
 - PostgreSQL：`127.0.0.1:5432`
-- API：`127.0.0.1:8000`
+- API：`127.0.0.1:9710`
 
-注意：Docker 部署只会启动数据库和控制面 API，不会部署任何真实代理节点软件。
+注意：Docker 部署只会启动数据库和/或控制面 API，不会部署任何真实代理节点软件。
 
 ## 技术栈
 
 - 语言：Go
+- CLI：Cobra
 - HTTP：Gin
 - 数据库：PostgreSQL
 - ORM：GORM
@@ -76,14 +81,16 @@ Docker 资源会显式加项目前缀，避免和其他项目重名：
 ## 目录结构
 
 ```text
-cmd/server/              服务入口，支持 migrate 和 serve 命令
+cmd/proxy-control-plane/              很薄的 CLI 入口
+internal/cli/            Cobra CLI 命令和本地配置初始化
 internal/config/         环境变量配置
 internal/domain/         核心业务模型
 internal/httpapi/        Gin HTTP API、鉴权、中间件和响应处理
 internal/security/       管理员 token、订阅 token、密码校验和哈希
 internal/store/          基于 GORM 的 PostgreSQL 访问和数据库迁移
 internal/subscription/   VLESS 订阅生成逻辑
-.local/                  本地私密配置模板和真实配置文件
+.local.example/          会进入仓库的示例配置模板
+.local/                  不进入仓库的本机私密配置
 ```
 
 ## 数据库
@@ -163,99 +170,152 @@ internal/subscription/   VLESS 订阅生成逻辑
 
 ## 本地开发
 
+构建 CLI：
+
+```bash
+go build -o proxy-control-plane ./cmd/proxy-control-plane
+```
+
 准备配置：
 
 ```bash
-make init-local
+./proxy-control-plane config init
 ```
 
-该命令会从模板生成本地私密配置文件：
+该命令会把 `.local.example/` 里的模板复制到 `.local/`，只创建缺失的文件：
 
 ```text
 .local/api.local.env
 .local/api.docker.env
+.local/api.remote.env
+.local/cli.env
 .local/postgres.env
 ```
 
-这些 `*.env` 文件会被 Git 忽略。运行前请按本机情况编辑它们。本机命令使用
-`.local/api.local.env`；Docker Compose 使用 `.local/api.docker.env` 和
-`.local/postgres.env`。
+整个 `.local/` 目录都会被 Git 和 Docker 忽略。运行前请按本机情况编辑这些私密
+配置。`config init` 主要是初始化配置的辅助命令；其他 CLI 命令在运行前也会自动
+调用它。
 
-启动数据库：
+默认数据库模式写在 `.local/cli.env`：
+
+- `DB=local`：使用本地 Compose PostgreSQL
+- `DB=remote`：使用 `.local/api.remote.env` 里的远程 PostgreSQL
+
+命令行仍然可以临时覆盖本机默认值，例如
+`./proxy-control-plane docker up --db=remote`。
+
+本机开发时，只启动本地数据库：
 
 ```bash
 docker compose up -d postgres
 ```
 
-执行迁移：
+对配置里的数据库执行迁移：
 
 ```bash
-make migrate
+./proxy-control-plane db migrate
 ```
 
-启动 API：
+在本机直接启动 API：
 
 ```bash
-make run
+./proxy-control-plane server serve
 ```
 
 健康检查：
 
 ```bash
-curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:9710/health
 ```
 
 运行测试：
 
 ```bash
-make test
+go test ./...
 ```
 
 ## Docker 启动
 
-```bash
-docker compose up --build
-```
-
-也可以让 `make` 先自动初始化本地配置：
+推荐的 Docker 入口就是一个命令：
 
 ```bash
-make docker-up
+./proxy-control-plane docker up
 ```
+
+数据库模式来自 `.local/cli.env`。命令行仍然可以临时覆盖：
+
+```bash
+./proxy-control-plane docker up --db=local
+./proxy-control-plane docker up --db=remote
+```
+
+`DB=local` 会启动 `postgres` 和 `api`；`DB=remote` 只启动 `api`，远程数据库地址
+从 `.local/api.remote.env` 读取。
 
 API 服务运行在：
 
 ```text
-http://127.0.0.1:8000
+http://127.0.0.1:9710
 ```
+
+## CLI 参数
+
+常用例子：
+
+```bash
+./proxy-control-plane server serve --db=remote --listen=:9710
+./proxy-control-plane db migrate --db=remote
+./proxy-control-plane docker up --db=remote --detach
+./proxy-control-plane server serve --env-file=.local/api.remote.env
+```
+
+`--db` 选择要读取哪组本地配置：
+
+- `--db=local`：本机命令读取 `.local/api.local.env`；Docker 读取
+  `.local/api.docker.env`
+- `--db=remote`：读取 `.local/api.remote.env`
+
+`--listen`、`--database-url`、`--auto-create-database`、`--auto-migrate` 这类
+直接参数会覆盖 `.local/*.env` 里的值。如果模板目录不在 `.local.example/`，
+可以用 `--example-dir` 指定。
 
 ## 常用配置项
 
-本地私密配置统一放在 `.local/` 目录下。
+示例配置统一放在 `.local.example/`；真实私密配置统一放在 `.local/`。
 
 会进入仓库的模板文件：
 
-- `.local/api.local.env.example`：本机执行 `make run` 和 `make migrate` 使用的 API 配置模板
-- `.local/api.docker.env.example`：Docker Compose 里的 API 容器配置模板
-- `.local/postgres.env.example`：Docker Compose 里的 PostgreSQL 容器配置模板
+- `.local.example/api.local.env`：本机执行 `server serve --db=local` 和 `db migrate --db=local` 使用的 API 配置模板
+- `.local.example/api.docker.env`：`docker up --db=local` 使用的 API 容器配置模板
+- `.local.example/api.remote.env`：`--db=remote` 使用的远程数据库 API 配置模板
+- `.local.example/cli.env`：本机 CLI 默认值配置模板，包括默认 `DB` 模式
+- `.local.example/postgres.env`：Docker Compose 里的 PostgreSQL 容器配置模板
 
-不会进入仓库的真实配置文件：
+不会进入仓库的真实配置目录：
 
-- `.local/api.local.env`
-- `.local/api.docker.env`
-- `.local/postgres.env`
+- `.local/`
 
 API 使用 `PCP_` 前缀的环境变量：
 
 - `PCP_APP_NAME`：应用名称
 - `PCP_ENVIRONMENT`：运行环境
-- `PCP_LISTEN_ADDR`：API 监听地址，默认 `:8000`
-- `PCP_DATABASE_URL`：PostgreSQL 连接地址
+- `PCP_LISTEN_ADDR`：API 监听地址，默认 `:9710`
+- `PCP_DATABASE_URL`：PostgreSQL 连接地址，远程数据库是否使用 SSL 也通过
+  这里的 `sslmode` 控制
 - `PCP_ADMIN_EMAIL`：管理员邮箱
 - `PCP_ADMIN_PASSWORD`：管理员密码，MVP 阶段可以使用环境变量明文引导
 - `PCP_SECRET_KEY`：访问 token 签名密钥
 - `PCP_ACCESS_TOKEN_EXPIRE_MINUTES`：管理员访问 token 有效期
-- `PCP_AUTO_MIGRATE`：启动 API 时是否自动执行迁移
+- `PCP_AUTO_CREATE_DATABASE`：连接前是否自动创建目标 PostgreSQL database
+- `PCP_AUTO_MIGRATE`：启动 API 时是否自动执行 GORM 表结构迁移
+
+自动创建数据库的逻辑会先连接名为 `postgres` 的维护数据库，检查
+`PCP_DATABASE_URL` 里的目标 database 是否存在；如果不存在，就执行
+`CREATE DATABASE`。配置里的 PostgreSQL 用户必须有创建数据库的权限。
+
+GORM `AutoMigrate` 是表结构迁移步骤：它会根据 Go model 自动创建或更新表、
+字段、索引和约束。它不负责创建 PostgreSQL database 本身；database 创建由
+`PCP_AUTO_CREATE_DATABASE` 单独负责。
 
 PostgreSQL 使用：
 

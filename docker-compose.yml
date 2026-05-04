@@ -5,7 +5,7 @@ services:
     container_name: proxy-control-plane_postgres
     image: postgres:17-alpine
     env_file:
-      - .local/postgres.env
+      - ${PCP_POSTGRES_ENV_FILE:-.local/postgres.env}
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
@@ -24,9 +24,9 @@ services:
       postgres:
         condition: service_healthy
     env_file:
-      - .local/api.docker.env
+      - ${PCP_API_ENV_FILE:-.local/api.docker.env}
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:9710:9710"
 
 volumes:
   postgres-data:

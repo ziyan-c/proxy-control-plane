@@ -24,6 +24,8 @@ This project is responsible for:
 - Managing account-to-node bindings
 - Creating and rotating subscription tokens while storing only token hashes in
   the database
+- Creating the target PostgreSQL database automatically when configured and
+  permitted by the database role
 - Generating VLESS subscription output from subscription tokens
 - Supporting both `raw` and base64-encoded `v2ray` subscription formats
 - Recording admin audit logs
@@ -49,11 +51,14 @@ deployment system.
 
 ## What Starts After Deployment
 
-The current `docker-compose.yml` starts two services:
+`docker-compose.yml` starts two local services:
 
 - `postgres`: PostgreSQL 17, used for customer, node, account, subscription,
   traffic, and audit data
 - `api`: the Go backend API service, used for admin APIs and subscription APIs
+
+`docker-compose.remote-db.yml` starts only `api` and connects it to a remote
+PostgreSQL database through `.local/api.remote.env`.
 
 Docker resources are explicitly prefixed to avoid name collisions:
 
@@ -66,14 +71,15 @@ Docker resources are explicitly prefixed to avoid name collisions:
 Default ports:
 
 - PostgreSQL: `127.0.0.1:5432`
-- API: `127.0.0.1:8000`
+- API: `127.0.0.1:9710`
 
-Important: Docker deployment starts only the database and the control-plane API.
-It does not deploy any real proxy node software.
+Important: Docker deployment starts only the database and/or the control-plane
+API. It does not deploy any real proxy node software.
 
 ## Tech Stack
 
 - Language: Go
+- CLI: Cobra
 - HTTP: Gin
 - Database: PostgreSQL
 - ORM: GORM
@@ -85,14 +91,16 @@ It does not deploy any real proxy node software.
 ## Project Structure
 
 ```text
-cmd/server/              Service entrypoint, supports migrate and serve commands
+cmd/proxy-control-plane/              Thin CLI entrypoint
+internal/cli/            Cobra CLI commands and local configuration bootstrap
 internal/config/         Environment-based configuration
 internal/domain/         Core business models
 internal/httpapi/        Gin HTTP API, authentication, middleware, and responses
 internal/security/       Admin tokens, subscription tokens, passwords, and hashes
 internal/store/          GORM-based PostgreSQL access and migrations
 internal/subscription/   VLESS subscription generation
-.local/                  Local-only private configuration templates and files
+.local.example/          Tracked example configuration templates
+.local/                  Ignored private local configuration
 ```
 
 ## Database
@@ -176,101 +184,165 @@ Authorization: Bearer <access_token>
 
 ## Local Development
 
+Build the CLI:
+
+```bash
+go build -o proxy-control-plane ./cmd/proxy-control-plane
+```
+
 Prepare configuration:
 
 ```bash
-make init-local
+./proxy-control-plane config init
 ```
 
-This creates local private config files from templates:
+This copies missing private config files from `.local.example/` into `.local/`:
 
 ```text
 .local/api.local.env
 .local/api.docker.env
+.local/api.remote.env
+.local/cli.env
 .local/postgres.env
 ```
 
-These `*.env` files are ignored by Git. Edit them locally before running the
-service. The host commands use `.local/api.local.env`; Docker Compose uses
-`.local/api.docker.env` and `.local/postgres.env`.
+The whole `.local/` directory is ignored by Git and Docker. Edit these private
+files locally before running the service. `config init` is mostly a bootstrap
+helper; the other CLI commands call it automatically before they run.
 
-Start PostgreSQL:
+Choose the default database mode in `.local/cli.env`:
+
+- `DB=local`: use the local Compose PostgreSQL service
+- `DB=remote`: use the remote PostgreSQL URL in `.local/api.remote.env`
+
+You can still override the local default for one command, for example
+`./proxy-control-plane docker up --db=remote`.
+
+Start only the local PostgreSQL service for host-based development:
 
 ```bash
 docker compose up -d postgres
 ```
 
-Run migrations:
+Run migrations against the configured database:
 
 ```bash
-make migrate
+./proxy-control-plane db migrate
 ```
 
-Start the API:
+Start the API directly on the host:
 
 ```bash
-make run
+./proxy-control-plane server serve
 ```
 
 Health check:
 
 ```bash
-curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:9710/health
 ```
 
 Run tests:
 
 ```bash
-make test
+go test ./...
 ```
 
 ## Docker
 
-```bash
-docker compose up --build
-```
-
-Or let `make` initialize local config first:
+The preferred Docker entrypoint is a single command:
 
 ```bash
-make docker-up
+./proxy-control-plane docker up
 ```
+
+The database mode comes from `.local/cli.env`. Command-line values still work
+as temporary overrides:
+
+```bash
+./proxy-control-plane docker up --db=local
+./proxy-control-plane docker up --db=remote
+```
+
+For `DB=local`, Compose starts both `postgres` and `api`. For `DB=remote`,
+Compose starts only `api` and reads the remote database URL from
+`.local/api.remote.env`.
 
 The API runs at:
 
 ```text
-http://127.0.0.1:8000
+http://127.0.0.1:9710
 ```
+
+## CLI Options
+
+Common examples:
+
+```bash
+./proxy-control-plane server serve --db=remote --listen=:9710
+./proxy-control-plane db migrate --db=remote
+./proxy-control-plane docker up --db=remote --detach
+./proxy-control-plane server serve --env-file=.local/api.remote.env
+```
+
+The selected `--db` profile decides which local config file is loaded:
+
+- `--db=local`: `.local/api.local.env` for host commands; Docker uses
+  `.local/api.docker.env`
+- `--db=remote`: `.local/api.remote.env`
+
+Direct flags such as `--listen`, `--database-url`, `--auto-create-database`,
+and `--auto-migrate` override values loaded from `.local/*.env`.
+Use `--example-dir` if you keep templates somewhere other than
+`.local.example/`.
 
 ## Configuration
 
-Private local configuration lives under `.local/`.
+Tracked examples live under `.local.example/`. Real private local configuration
+lives under `.local/`.
 
 Tracked templates:
 
-- `.local/api.local.env.example`: host-local API config for `make run` and
-  `make migrate`
-- `.local/api.docker.env.example`: API container config for Docker Compose
-- `.local/postgres.env.example`: PostgreSQL container config for Docker Compose
+- `.local.example/api.local.env`: host-local API config for `server serve --db=local` and
+  `db migrate --db=local`
+- `.local.example/api.docker.env`: API container config for Docker Compose with
+  `--db=local`
+- `.local.example/api.remote.env`: API config for host or Docker runs with
+  `--db=remote`
+- `.local.example/cli.env`: local CLI defaults, including the default `DB`
+  profile
+- `.local.example/postgres.env`: PostgreSQL container config for Docker Compose
 
-Ignored real config files:
+Ignored real config directory:
 
-- `.local/api.local.env`
-- `.local/api.docker.env`
-- `.local/postgres.env`
+- `.local/`
 
 The API uses environment variables with the `PCP_` prefix:
 
 - `PCP_APP_NAME`: application name
 - `PCP_ENVIRONMENT`: runtime environment
-- `PCP_LISTEN_ADDR`: API listen address, defaults to `:8000`
-- `PCP_DATABASE_URL`: PostgreSQL connection URL
+- `PCP_LISTEN_ADDR`: API listen address, defaults to `:9710`
+- `PCP_DATABASE_URL`: PostgreSQL connection URL, including the `sslmode`
+  choice for remote databases
 - `PCP_ADMIN_EMAIL`: admin email
 - `PCP_ADMIN_PASSWORD`: admin password; plaintext env bootstrap is supported
   for the MVP stage
 - `PCP_SECRET_KEY`: access token signing key
 - `PCP_ACCESS_TOKEN_EXPIRE_MINUTES`: admin access token lifetime
-- `PCP_AUTO_MIGRATE`: whether to run migrations automatically when the API starts
+- `PCP_AUTO_CREATE_DATABASE`: whether to create the target PostgreSQL database
+  automatically before connecting to it
+- `PCP_AUTO_MIGRATE`: whether to run GORM table migrations automatically when
+  the API starts
+
+Automatic database creation connects to the maintenance database named
+`postgres`, checks whether the database from `PCP_DATABASE_URL` exists, and runs
+`CREATE DATABASE` when it is missing. The configured PostgreSQL user must have
+permission to create databases.
+
+GORM `AutoMigrate` is the table migration step. It creates or updates tables,
+columns, indexes, and constraints based on the Go model definitions. It does
+not create the PostgreSQL database itself; that is handled separately by
+`PCP_AUTO_CREATE_DATABASE`.
 
 PostgreSQL uses:
 
