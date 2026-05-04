@@ -30,11 +30,7 @@ func newConfigInitCommand(opts *Options) *cobra.Command {
 
 func initLocal(configDir string, exampleDir string) error {
 	files := map[string]string{
-		"api.local.env":  "api.local.env",
-		"api.docker.env": "api.docker.env",
-		"api.remote.env": "api.remote.env",
-		"cli.env":        "cli.env",
-		"postgres.env":   "postgres.env",
+		"app.env": "app.env",
 	}
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		return err
@@ -64,6 +60,9 @@ func copyTemplateIfMissing(templatePath string, targetPath string) error {
 	content, err := os.ReadFile(templatePath)
 	if err != nil {
 		return fmt.Errorf("read template %s: %w", templatePath, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		return err
 	}
 	if err := os.WriteFile(targetPath, content, 0o600); err != nil {
 		return fmt.Errorf("create %s: %w", targetPath, err)

@@ -16,6 +16,7 @@ RUN addgroup -S app && adduser -S app -G app
 
 WORKDIR /app
 COPY --from=build /out/proxy-control-plane /app/proxy-control-plane
+COPY migrations ./migrations
 
 USER app
 EXPOSE 9710

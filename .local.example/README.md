@@ -1,22 +1,13 @@
-# Local Configuration Examples
+# Local Configuration Example
 
-This directory contains tracked example configuration files for local
-development and deployment.
-
-Real private configuration belongs in `.local/`. The `.local/` directory is
-ignored by Git and Docker so secrets stay on your machine.
+This directory contains the tracked example configuration for local development
+and deployment. Real private configuration belongs in `.local/`, which is
+ignored by Git and Docker.
 
 ## Files
 
-- `api.local.env`: example for running the API directly on the host with
-  `proxy-control-plane server serve --db=local` or
-  `proxy-control-plane db migrate --db=local`
-- `api.docker.env`: example for the API container when Docker Compose starts a
-  local PostgreSQL container
-- `api.remote.env`: example for host or Docker runs that connect the API to a
-  remote PostgreSQL database
-- `cli.env`: example CLI defaults, such as `DB=remote`
-- `postgres.env`: example PostgreSQL container settings for Docker Compose
+- `app.env`: API runtime configuration. This is the only local config file the
+  CLI and Docker Compose read by default.
 
 ## First Setup
 
@@ -26,22 +17,27 @@ From the repository root:
 ./proxy-control-plane config init
 ```
 
-That command copies missing files from `.local.example/` into `.local/`.
+That command copies `.local.example/app.env` into `.local/app.env` when the
+private file is missing.
 
-Then edit the generated private files:
+Then edit:
 
 ```text
-.local/cli.env
-.local/api.local.env
-.local/api.docker.env
-.local/api.remote.env
-.local/postgres.env
+.local/app.env
 ```
 
-Set `DB=local` or `DB=remote` in `.local/cli.env` to choose the default database
-profile for `server serve`, `db migrate`, and `docker up`. A command like
-`proxy-control-plane docker up --db=local` can still override that default for
-one run.
+Use strong values for `PCP_ADMIN_PASSWORD` and `PCP_SECRET_KEY` outside
+disposable local development.
 
-Use strong values for `PCP_ADMIN_PASSWORD`, `PCP_SECRET_KEY`, and
-`POSTGRES_PASSWORD` outside disposable local development.
+`PCP_AUTO_MIGRATE=false` keeps server startup from changing table structure.
+Run the versioned SQL migrations explicitly with:
+
+```bash
+./proxy-control-plane db migrate
+```
+
+GORM AutoMigrate is still available for active development:
+
+```bash
+./proxy-control-plane db automigrate
+```

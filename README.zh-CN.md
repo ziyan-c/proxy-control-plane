@@ -2,171 +2,140 @@
 
 [English](README.md)
 
-`proxy-control-plane` 是一个用 Go 实现的代理业务控制面服务。它不是代理服务器
-本身，而是管理客户、代理节点、代理账号、订阅 token、订阅输出和业务数据的
-后端 API。
+`proxy-control-plane` 是一个用 Go 实现的代理业务控制面。它不是代理服务器
+本身，而是负责提供后端 API 和业务数据模型，用来管理客户、代理节点、代理账号、
+订阅 token、订阅输出、流量记录和管理审计日志。
 
-这个项目的核心目标是把“业务控制面”和“真实代理节点部署”分开：本项目保存和
-管理动态业务状态，真实 VPS、Xray、sing-box、证书、防火墙等基础设施由其他
-运维工具负责。
+这个项目的核心设计是分层：本项目只管理动态业务状态，真实节点部署放到别的
+基础设施工具里做。VPS 创建、Xray 或 sing-box 安装、TLS 证书、防火墙规则、
+节点配置下发，都不应该塞进这个控制面里。
 
-## 这个项目负责什么
+## 项目负责什么
 
-本项目负责：
-
-- 管理客户信息：邮箱、显示名称、状态、过期时间
-- 管理代理节点信息：节点名、域名、公网地址、地区、端口、传输方式、安全参数
-- 管理代理账号：VLESS UUID、账号标识、启用状态、过期时间、流量上限
-- 管理账号与节点之间的绑定关系
-- 生成和轮换订阅 token，数据库只保存 token 哈希值
-- 在配置允许且数据库用户有权限时，自动创建目标 PostgreSQL database
-- 根据订阅 token 输出 VLESS 订阅内容
-- 支持 `raw` 和 base64 编码的 `v2ray` 订阅格式
+- 管理客户、代理节点、代理账号、账号与节点绑定关系
+- 创建和轮换订阅 token，数据库只保存 token 哈希值
+- 输出 VLESS 订阅，支持 base64 `v2ray` 格式和原始 URI 格式
+- 提供管理员登录和 Bearer token 保护的管理 API
 - 记录管理操作审计日志
-- 提供流量上报入口和流量记录表，为后续统计、限流、套餐能力打基础
-- 启动时自动执行 GORM `AutoMigrate`
+- 接收流量使用上报，为后续套餐、配额、限流打基础
+- 通过 GORM 连接 PostgreSQL
+- 在数据库账号权限允许时自动创建目标 PostgreSQL database
+- 执行版本化 SQL migration，也可以在本地开发时保留 GORM `AutoMigrate`
+- 提供 Cobra CLI，用来初始化配置、执行数据库迁移、启动 API、启动 Docker Compose
 
-## 这个项目不负责什么
+## 项目不负责什么
 
-本项目不负责：
+这个仓库不会部署真实代理节点。它不负责：
 
-- 不购买或创建 VPS
-- 不安装 Xray、sing-box、Nginx、Caddy 等服务器软件
-- 不配置系统防火墙、安全组或端口转发
-- 不申请或续签 TLS 证书
-- 不部署 WireGuard
-- 不把配置自动下发到真实代理节点
-- 不直接采集真实代理进程的流量
+- 购买或创建 VPS
+- 安装 Xray、sing-box、Nginx、Caddy 等服务器软件
+- 配置系统防火墙、云安全组或端口转发
+- 申请或续签 TLS 证书
+- 部署 WireGuard
+- 把节点配置下发到真实服务器
+- 直接从真实代理进程采集流量
 
-这些属于基础设施或节点运维层面的工作，可以由 `ansible-infra`、节点 agent、
-CI/CD、Ansible、Terraform 或其他运维系统负责。
+这些事情更适合放到节点 agent、Ansible、Terraform、CI/CD 或另一个基础设施项目里。
 
 ## 部署后会启动什么
 
-`docker-compose.yml` 会启动两个本地服务：
+`docker-compose.yml` 现在只启动一个服务：
 
-- `postgres`：PostgreSQL 17 数据库，保存客户、节点、账号、订阅、流量和审计数据
-- `api`：Go 后端 API 服务，提供管理接口和订阅接口
+- `api`：Go 控制面 API
 
-`docker-compose.remote-db.yml` 只启动 `api`，并通过 `.local/api.remote.env`
-连接远程 PostgreSQL。
+PostgreSQL 被设计成外部依赖，不再混在这个 Compose 里。它可以是远程专用
+PostgreSQL、云数据库，也可以是你自己另外启动的本机 PostgreSQL。API 会从
+`.local/app.env` 读取数据库连接地址。
 
-Docker 资源会显式加项目前缀，避免和其他项目重名：
+如果 `PCP_AUTO_CREATE_DATABASE=true`，服务会先尝试连接目标 database。目标
+database 不存在时，它会连接同一台 PostgreSQL 的 `postgres` 维护库，然后执行
+`CREATE DATABASE <target>`。这要求数据库账号有足够权限。schema 管理路径是显式
+执行 `./proxy-control-plane db migrate`，它会按顺序执行 `migrations/` 里的 SQL
+文件，并把已执行版本记录到 `schema_migrations`。GORM `AutoMigrate` 仍然保留为
+开发辅助命令：`./proxy-control-plane db automigrate`。
 
-- 项目名：`proxy-control-plane`
+Docker 名字都加了项目前缀，避免和其他项目冲突：
+
+- Compose 项目名：`proxy-control-plane`
+- API 镜像：`proxy-control-plane_api:local`
 - API 容器：`proxy-control-plane_api`
-- PostgreSQL 容器：`proxy-control-plane_postgres`
-- PostgreSQL 数据卷：`proxy-control-plane_postgres-data`
 - 网络：`proxy-control-plane_network`
 
-默认端口：
+默认 API 端口：
 
-- PostgreSQL：`127.0.0.1:5432`
-- API：`127.0.0.1:9710`
+- `127.0.0.1:9710`
 
-注意：Docker 部署只会启动数据库和/或控制面 API，不会部署任何真实代理节点软件。
+Docker 不会启动或配置 Xray、sing-box、证书、防火墙、真实代理节点软件。
 
 ## 技术栈
 
-- 语言：Go
-- CLI：Cobra
-- HTTP：Gin
-- 数据库：PostgreSQL
-- ORM：GORM
-- 数据库驱动：`gorm.io/driver/postgres`
-- 迁移：GORM `AutoMigrate`
-- 测试：`go test`
-- 部署：Docker / Docker Compose
+- Go：部署简单，可以编译成单个二进制，启动快，适合长期运行的 API 服务
+- Cobra：适合做分组清晰的命令行工具，帮助信息和参数体验更好
+- Gin：轻量、成熟，适合这个 API 层
+- PostgreSQL：可靠的关系型数据库，适合客户、账号、节点、订阅、流量、审计数据
+- GORM：用模型驱动 CRUD，并保留开发阶段的 `AutoMigrate`
+- SQL migration：用版本化 SQL 管理更可控的生产 schema 变更
+- Docker Compose：用来稳定启动 API 容器
+
+这个技术栈的取向是运维简单：项目既可以作为一个 Go 二进制直接跑，也可以作为
+一个 Docker 容器跑；PostgreSQL 是明确的外部依赖。
 
 ## 目录结构
 
 ```text
-cmd/proxy-control-plane/              很薄的 CLI 入口
-internal/cli/            Cobra CLI 命令和本地配置初始化
-internal/config/         环境变量配置
-internal/domain/         核心业务模型
-internal/httpapi/        Gin HTTP API、鉴权、中间件和响应处理
-internal/security/       管理员 token、订阅 token、密码校验和哈希
-internal/store/          基于 GORM 的 PostgreSQL 访问和数据库迁移
-internal/subscription/   VLESS 订阅生成逻辑
-.local.example/          会进入仓库的示例配置模板
-.local/                  不进入仓库的本机私密配置
+cmd/proxy-control-plane/  很薄的 CLI 入口
+internal/cli/             Cobra 命令和本地配置初始化
+internal/config/          基于环境变量的配置加载
+internal/domain/          核心业务模型
+internal/httpapi/         Gin API、鉴权中间件、处理函数和响应
+internal/security/        管理员 token、订阅 token、密码校验、哈希
+internal/store/           GORM PostgreSQL 访问和迁移
+internal/subscription/    VLESS 订阅生成逻辑
+migrations/               版本化 SQL 数据库迁移
+.local.example/           进入仓库的示例配置
+.local/                   不进入仓库的私密配置
 ```
 
-## 数据库
+## 配置
 
-当前主要数据表：
+现在配置模型故意收敛成一个文件：
 
-- `customers`：客户
-- `proxy_nodes`：代理节点
-- `proxy_accounts`：代理账号
-- `proxy_account_nodes`：代理账号与代理节点的多对多绑定关系
-- `subscription_tokens`：订阅 token 记录，保存 token 哈希，不保存明文 token
-- `traffic_usage`：流量使用记录
-- `audit_logs`：管理操作审计日志
+```text
+.local.example/app.env  示例配置，进入 Git
+.local/app.env          真实私密配置，被 Git 和 Docker 忽略
+```
 
-## 主要接口
+创建私密配置：
 
-健康检查：
+```bash
+./proxy-control-plane config init
+```
 
-- `GET /health`
+然后编辑 `.local/app.env`。
 
-管理员登录：
+关键配置项：
 
-- `POST /admin/login`
+```env
+PCP_LISTEN_ADDR=:9710
+PCP_DATABASE_URL=postgres://user:password@host:5432/proxy_control?sslmode=require
+PCP_ADMIN_EMAIL=admin@example.com
+PCP_ADMIN_PASSWORD=change-this
+PCP_SECRET_KEY=change-this-with-a-long-random-secret
+PCP_AUTO_CREATE_DATABASE=true
+PCP_AUTO_MIGRATE=false
+```
 
-客户管理：
+远程 PostgreSQL 如果支持 SSL，建议用 `sslmode=require`。只有在可信内网或本机
+测试时才用 `sslmode=disable`。
+正常使用建议保持 `PCP_AUTO_MIGRATE=false`，这样服务启动时不会自动改表结构。
+数据库结构变化统一用 `./proxy-control-plane db migrate`。只有你明确想在开发时
+让服务启动前自动跑 GORM `AutoMigrate`，才临时改成 `true`。
 
-- `GET /admin/customers`
-- `POST /admin/customers`
-- `GET /admin/customers/{id}`
-- `PATCH /admin/customers/{id}`
-- `DELETE /admin/customers/{id}`
+运行时优先级是：
 
-节点管理：
-
-- `GET /admin/nodes`
-- `POST /admin/nodes`
-- `GET /admin/nodes/{id}`
-- `PATCH /admin/nodes/{id}`
-- `DELETE /admin/nodes/{id}`
-
-代理账号管理：
-
-- `GET /admin/proxy-accounts`
-- `POST /admin/proxy-accounts`
-- `GET /admin/proxy-accounts/{id}`
-- `PATCH /admin/proxy-accounts/{id}`
-- `DELETE /admin/proxy-accounts/{id}`
-
-订阅 token 管理：
-
-- `GET /admin/subscription-tokens`
-- `POST /admin/subscription-tokens`
-- `GET /admin/subscription-tokens/{id}`
-- `PATCH /admin/subscription-tokens/{id}`
-- `POST /admin/subscription-tokens/{id}/rotate`
-
-流量记录：
-
-- `POST /admin/traffic-usage`
-
-客户端订阅：
-
-- `GET /sub/{token}`：返回 base64 编码后的 VLESS 订阅内容
-- `GET /sub/{token}?fmt=raw`：返回原始 VLESS 链接文本
-
-除 `/health`、`/admin/login` 和 `/sub/{token}` 外，管理接口都需要
-`Authorization: Bearer <access_token>`。
-
-## 基本使用流程
-
-1. 管理员通过 `/admin/login` 登录，拿到 Bearer token。
-2. 创建客户。
-3. 创建一个或多个代理节点。
-4. 为客户创建代理账号，并绑定可访问的节点。
-5. 为客户创建订阅 token。
-6. 客户端访问 `/sub/{token}` 获取订阅内容。
+1. 命令行直接参数，比如 `--database-url`、`--listen`
+2. `.local/app.env` 里的配置
+3. 代码里的开发默认值
 
 ## 本地开发
 
@@ -176,47 +145,26 @@ internal/subscription/   VLESS 订阅生成逻辑
 go build -o proxy-control-plane ./cmd/proxy-control-plane
 ```
 
-准备配置：
+初始化并编辑配置：
 
 ```bash
 ./proxy-control-plane config init
+$EDITOR .local/app.env
 ```
 
-该命令会把 `.local.example/` 里的模板复制到 `.local/`，只创建缺失的文件：
-
-```text
-.local/api.local.env
-.local/api.docker.env
-.local/api.remote.env
-.local/cli.env
-.local/postgres.env
-```
-
-整个 `.local/` 目录都会被 Git 和 Docker 忽略。运行前请按本机情况编辑这些私密
-配置。`config init` 主要是初始化配置的辅助命令；其他 CLI 命令在运行前也会自动
-调用它。
-
-默认数据库模式写在 `.local/cli.env`：
-
-- `DB=local`：使用本地 Compose PostgreSQL
-- `DB=remote`：使用 `.local/api.remote.env` 里的远程 PostgreSQL
-
-命令行仍然可以临时覆盖本机默认值，例如
-`./proxy-control-plane docker up --db=remote`。
-
-本机开发时，只启动本地数据库：
-
-```bash
-docker compose up -d postgres
-```
-
-对配置里的数据库执行迁移：
+执行版本化 SQL 迁移：
 
 ```bash
 ./proxy-control-plane db migrate
 ```
 
-在本机直接启动 API：
+开发模型时，也可以直接执行 GORM AutoMigrate：
+
+```bash
+./proxy-control-plane db automigrate
+```
+
+在本机启动 API：
 
 ```bash
 ./proxy-control-plane server serve
@@ -228,138 +176,140 @@ docker compose up -d postgres
 curl http://127.0.0.1:9710/health
 ```
 
-运行测试：
-
-```bash
-go test ./...
-```
-
 ## Docker 启动
 
-推荐的 Docker 入口就是一个命令：
+启动 API 容器：
 
 ```bash
 ./proxy-control-plane docker up
 ```
 
-数据库模式来自 `.local/cli.env`。命令行仍然可以临时覆盖：
+常用参数：
 
 ```bash
-./proxy-control-plane docker up --db=local
-./proxy-control-plane docker up --db=remote
+./proxy-control-plane docker up --detach
+./proxy-control-plane docker up --build=false
 ```
 
-`DB=local` 会启动 `postgres` 和 `api`；`DB=remote` 只启动 `api`，远程数据库地址
-从 `.local/api.remote.env` 读取。
+Docker 命令默认读取 `.local/app.env`，并通过 `PCP_APP_ENV_FILE` 传给 Compose。
+容器内部实际执行：
 
-API 服务运行在：
+```bash
+/app/proxy-control-plane server serve --no-local-config
+```
+
+也就是说，Compose 负责注入环境变量，容器不会再去镜像内部读取 `.local/`。
+
+## CLI 命令
+
+```bash
+./proxy-control-plane config init
+./proxy-control-plane db migrate
+./proxy-control-plane db automigrate
+./proxy-control-plane server serve
+./proxy-control-plane docker up
+```
+
+常用参数：
+
+```bash
+./proxy-control-plane server serve --listen=:9710
+./proxy-control-plane server serve --env-file=.local/app.env
+./proxy-control-plane server serve --database-url='postgres://user:password@host:5432/proxy_control?sslmode=require'
+./proxy-control-plane server serve --auto-create-database=true --auto-migrate=true
+./proxy-control-plane db migrate --database-url='postgres://user:password@host:5432/proxy_control?sslmode=require'
+./proxy-control-plane db migrate --migrations-dir=migrations
+./proxy-control-plane db automigrate
+./proxy-control-plane docker up --detach
+```
+
+只有想换配置目录时，才需要用 `--config-dir` 和 `--example-dir`：
+
+```bash
+./proxy-control-plane --config-dir=.local --example-dir=.local.example config init
+```
+
+## 主要接口
+
+健康检查：
+
+- `GET /health`
+
+管理员：
+
+- `POST /admin/login`
+
+客户：
+
+- `GET /admin/customers`
+- `POST /admin/customers`
+- `GET /admin/customers/{id}`
+- `PATCH /admin/customers/{id}`
+- `DELETE /admin/customers/{id}`
+
+代理节点：
+
+- `GET /admin/nodes`
+- `POST /admin/nodes`
+- `GET /admin/nodes/{id}`
+- `PATCH /admin/nodes/{id}`
+- `DELETE /admin/nodes/{id}`
+
+代理账号：
+
+- `GET /admin/proxy-accounts`
+- `POST /admin/proxy-accounts`
+- `GET /admin/proxy-accounts/{id}`
+- `PATCH /admin/proxy-accounts/{id}`
+- `DELETE /admin/proxy-accounts/{id}`
+
+订阅 token：
+
+- `GET /admin/subscription-tokens`
+- `POST /admin/subscription-tokens`
+- `GET /admin/subscription-tokens/{id}`
+- `PATCH /admin/subscription-tokens/{id}`
+- `POST /admin/subscription-tokens/{id}/rotate`
+
+流量：
+
+- `POST /admin/traffic-usage`
+
+客户端订阅：
+
+- `GET /sub/{token}` 返回 base64 VLESS 订阅内容
+- `GET /sub/{token}?fmt=raw` 返回原始 VLESS URI 文本
+
+除 `/health`、`/admin/login` 和 `/sub/{token}` 外，管理接口都需要：
 
 ```text
-http://127.0.0.1:9710
+Authorization: Bearer <access_token>
 ```
 
-## CLI 参数
+## 数据库表
 
-常用例子：
+- `customers`
+- `proxy_nodes`
+- `proxy_accounts`
+- `proxy_account_nodes`
+- `subscription_tokens`
+- `traffic_usage`
+- `audit_logs`
+- `schema_migrations`：记录已经执行过的 SQL migration
+
+## 基本操作流程
+
+1. 配置 `.local/app.env`。
+2. 执行 `./proxy-control-plane db migrate`。
+3. 用 `./proxy-control-plane server serve` 或 `./proxy-control-plane docker up` 启动 API。
+4. 通过 `POST /admin/login` 登录。
+5. 创建客户、节点、代理账号、账号节点绑定、订阅 token。
+6. 给客户端使用类似 `http://host:9710/sub/{token}` 的订阅地址。
+
+## 验证
 
 ```bash
-./proxy-control-plane server serve --db=remote --listen=:9710
-./proxy-control-plane db migrate --db=remote
-./proxy-control-plane docker up --db=remote --detach
-./proxy-control-plane server serve --env-file=.local/api.remote.env
+go test ./...
+go vet ./...
+docker compose -f docker-compose.yml config --quiet
 ```
-
-`--db` 选择要读取哪组本地配置：
-
-- `--db=local`：本机命令读取 `.local/api.local.env`；Docker 读取
-  `.local/api.docker.env`
-- `--db=remote`：读取 `.local/api.remote.env`
-
-`--listen`、`--database-url`、`--auto-create-database`、`--auto-migrate` 这类
-直接参数会覆盖 `.local/*.env` 里的值。如果模板目录不在 `.local.example/`，
-可以用 `--example-dir` 指定。
-
-## 常用配置项
-
-示例配置统一放在 `.local.example/`；真实私密配置统一放在 `.local/`。
-
-会进入仓库的模板文件：
-
-- `.local.example/api.local.env`：本机执行 `server serve --db=local` 和 `db migrate --db=local` 使用的 API 配置模板
-- `.local.example/api.docker.env`：`docker up --db=local` 使用的 API 容器配置模板
-- `.local.example/api.remote.env`：`--db=remote` 使用的远程数据库 API 配置模板
-- `.local.example/cli.env`：本机 CLI 默认值配置模板，包括默认 `DB` 模式
-- `.local.example/postgres.env`：Docker Compose 里的 PostgreSQL 容器配置模板
-
-不会进入仓库的真实配置目录：
-
-- `.local/`
-
-API 使用 `PCP_` 前缀的环境变量：
-
-- `PCP_APP_NAME`：应用名称
-- `PCP_ENVIRONMENT`：运行环境
-- `PCP_LISTEN_ADDR`：API 监听地址，默认 `:9710`
-- `PCP_DATABASE_URL`：PostgreSQL 连接地址，远程数据库是否使用 SSL 也通过
-  这里的 `sslmode` 控制
-- `PCP_ADMIN_EMAIL`：管理员邮箱
-- `PCP_ADMIN_PASSWORD`：管理员密码，MVP 阶段可以使用环境变量明文引导
-- `PCP_SECRET_KEY`：访问 token 签名密钥
-- `PCP_ACCESS_TOKEN_EXPIRE_MINUTES`：管理员访问 token 有效期
-- `PCP_AUTO_CREATE_DATABASE`：连接前是否自动创建目标 PostgreSQL database
-- `PCP_AUTO_MIGRATE`：启动 API 时是否自动执行 GORM 表结构迁移
-
-自动创建数据库的逻辑会先连接名为 `postgres` 的维护数据库，检查
-`PCP_DATABASE_URL` 里的目标 database 是否存在；如果不存在，就执行
-`CREATE DATABASE`。配置里的 PostgreSQL 用户必须有创建数据库的权限。
-
-GORM `AutoMigrate` 是表结构迁移步骤：它会根据 Go model 自动创建或更新表、
-字段、索引和约束。它不负责创建 PostgreSQL database 本身；database 创建由
-`PCP_AUTO_CREATE_DATABASE` 单独负责。
-
-PostgreSQL 使用：
-
-- `POSTGRES_USER`：数据库用户
-- `POSTGRES_PASSWORD`：数据库密码
-- `POSTGRES_DB`：数据库名
-
-## 订阅参数能力
-
-节点模型已经预留常见 VLESS 参数：
-
-- `transport`
-- `security`
-- `sni`
-- `fingerprint`
-- `alpn`
-- `path`
-- `host_header`
-- `reality_public_key`
-- `reality_short_id`
-
-订阅生成时会把这些字段转换成 VLESS URI 查询参数。
-
-## 当前状态
-
-当前版本已经从 Python/FastAPI MVP 重构为 Go 服务，并补齐了更完整的控制面骨架：
-
-- Go API 服务
-- PostgreSQL 数据模型和 GORM 迁移
-- 管理员登录和 Bearer token 鉴权
-- 客户、节点、代理账号、订阅 token 的基础 CRUD
-- 订阅 token 轮换
-- VLESS 订阅生成
-- 流量记录入口
-- 审计日志
-- Docker 和 CI
-
-还没有实现的内容：
-
-- 真实节点配置下发
-- 节点 agent
-- 自动安装或更新 Xray/sing-box
-- 套餐计费
-- 流量超额自动禁用
-- Web 管理后台页面
-
-这些后续可以作为独立模块逐步接入，避免控制面和基础设施部署逻辑混在一起。

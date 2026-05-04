@@ -31,7 +31,7 @@ func Load() Config {
 		SecretKey:                getEnv("PCP_SECRET_KEY", "change-me-with-openssl-rand-base64-32"),
 		AccessTokenExpireMinutes: getEnvInt("PCP_ACCESS_TOKEN_EXPIRE_MINUTES", 60),
 		AutoCreateDatabase:       getEnvBool("PCP_AUTO_CREATE_DATABASE", true),
-		AutoMigrate:              getEnvBool("PCP_AUTO_MIGRATE", true),
+		AutoMigrate:              getEnvBool("PCP_AUTO_MIGRATE", false),
 	}
 }
 

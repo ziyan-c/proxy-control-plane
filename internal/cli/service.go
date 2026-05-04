@@ -19,14 +19,22 @@ import (
 )
 
 type serviceOptions struct {
-	dbProfile          string
 	envFile            string
 	listenAddr         string
 	databaseURL        string
 	autoCreateDatabase string
 	autoMigrate        string
+	migrationsDir      string
 	noLocalConfig      bool
 }
+
+type serviceMode int
+
+const (
+	serviceModeServe serviceMode = iota
+	serviceModeSQLMigrate
+	serviceModeAutoMigrate
+)
 
 func newServerCommand(rootOpts *Options) *cobra.Command {
 	cmd := &cobra.Command{
@@ -43,12 +51,12 @@ func newServerServeCommand(rootOpts *Options) *cobra.Command {
 		Use:   "serve",
 		Short: "Start the HTTP API service",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runService(cmd, rootOpts, opts, true)
+			return runService(cmd, rootOpts, opts, serviceModeServe)
 		},
 	}
 	addServiceFlags(cmd, opts)
 	cmd.Flags().StringVar(&opts.listenAddr, "listen", "", "API listen address, for example :9710")
-	cmd.Flags().StringVar(&opts.autoMigrate, "auto-migrate", "", "true or false; run GORM table migrations before serving")
+	cmd.Flags().StringVar(&opts.autoMigrate, "auto-migrate", "", "true or false; run GORM AutoMigrate before serving")
 	return cmd
 }
 
@@ -57,7 +65,10 @@ func newDBCommand(rootOpts *Options) *cobra.Command {
 		Use:   "db",
 		Short: "Manage database schema and data",
 	}
-	cmd.AddCommand(newDBMigrateCommand(rootOpts))
+	cmd.AddCommand(
+		newDBMigrateCommand(rootOpts),
+		newDBAutoMigrateCommand(rootOpts),
+	)
 	return cmd
 }
 
@@ -65,9 +76,23 @@ func newDBMigrateCommand(rootOpts *Options) *cobra.Command {
 	opts := &serviceOptions{}
 	cmd := &cobra.Command{
 		Use:   "migrate",
-		Short: "Run database migrations",
+		Short: "Run versioned SQL database migrations",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runService(cmd, rootOpts, opts, false)
+			return runService(cmd, rootOpts, opts, serviceModeSQLMigrate)
+		},
+	}
+	addServiceFlags(cmd, opts)
+	cmd.Flags().StringVar(&opts.migrationsDir, "migrations-dir", "migrations", "directory containing versioned .sql migrations")
+	return cmd
+}
+
+func newDBAutoMigrateCommand(rootOpts *Options) *cobra.Command {
+	opts := &serviceOptions{}
+	cmd := &cobra.Command{
+		Use:   "automigrate",
+		Short: "Run GORM AutoMigrate",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runService(cmd, rootOpts, opts, serviceModeAutoMigrate)
 		},
 	}
 	addServiceFlags(cmd, opts)
@@ -75,14 +100,13 @@ func newDBMigrateCommand(rootOpts *Options) *cobra.Command {
 }
 
 func addServiceFlags(cmd *cobra.Command, opts *serviceOptions) {
-	cmd.Flags().StringVar(&opts.dbProfile, "db", "", "database profile: local or remote; defaults from cli.env")
-	cmd.Flags().StringVar(&opts.envFile, "env-file", "", "explicit API env file; overrides --db profile selection")
+	cmd.Flags().StringVar(&opts.envFile, "env-file", "", "explicit API env file; defaults to .local/app.env")
 	cmd.Flags().StringVar(&opts.databaseURL, "database-url", "", "PostgreSQL connection URL")
 	cmd.Flags().StringVar(&opts.autoCreateDatabase, "auto-create-database", "", "true or false; create missing target database before connecting")
 	cmd.Flags().BoolVar(&opts.noLocalConfig, "no-local-config", false, "read configuration only from environment variables and direct flags")
 }
 
-func runService(cmd *cobra.Command, rootOpts *Options, opts *serviceOptions, serveMode bool) error {
+func runService(cmd *cobra.Command, rootOpts *Options, opts *serviceOptions, mode serviceMode) error {
 	if !opts.noLocalConfig || opts.envFile != "" {
 		if !opts.noLocalConfig {
 			if err := initLocal(rootOpts.ConfigDir, effectiveExampleDir(cmd, rootOpts)); err != nil {
@@ -92,14 +116,7 @@ func runService(cmd *cobra.Command, rootOpts *Options, opts *serviceOptions, ser
 
 		envFile := opts.envFile
 		if envFile == "" {
-			dbProfile, err := resolveDBProfile(opts.dbProfile, rootOpts.ConfigDir)
-			if err != nil {
-				return err
-			}
-			envFile, err = apiEnvFile(rootOpts.ConfigDir, dbProfile)
-			if err != nil {
-				return err
-			}
+			envFile = appEnvFile(rootOpts.ConfigDir)
 		}
 		if err := loadEnvFile(envFile, true); err != nil {
 			return err
@@ -120,15 +137,26 @@ func runService(cmd *cobra.Command, rootOpts *Options, opts *serviceOptions, ser
 	}
 	defer st.Close()
 
-	if !serveMode {
-		return st.Migrate(ctx)
-	}
-	if cfg.AutoMigrate {
-		if err := st.Migrate(ctx); err != nil {
+	switch mode {
+	case serviceModeSQLMigrate:
+		results, err := st.ApplySQLMigrations(ctx, opts.migrationsDir)
+		if err != nil {
 			return err
 		}
+		printMigrationResults(results)
+		return nil
+	case serviceModeAutoMigrate:
+		return st.AutoMigrate(ctx)
+	case serviceModeServe:
+		if cfg.AutoMigrate {
+			if err := st.AutoMigrate(ctx); err != nil {
+				return err
+			}
+		}
+		return serve(ctx, cfg, st)
+	default:
+		return fmt.Errorf("unknown service mode %d", mode)
 	}
-	return serve(ctx, cfg, st)
 }
 
 func applyServiceOptions(cfg *config.Config, opts *serviceOptions) error {
@@ -153,6 +181,23 @@ func applyServiceOptions(cfg *config.Config, opts *serviceOptions) error {
 		cfg.AutoMigrate = value
 	}
 	return nil
+}
+
+func printMigrationResults(results []store.MigrationResult) {
+	if len(results) == 0 {
+		log.Println("no SQL migration files found")
+		return
+	}
+	applied := 0
+	for _, result := range results {
+		if result.Applied {
+			applied++
+			log.Printf("applied SQL migration %s", result.Name)
+		} else {
+			log.Printf("skipped SQL migration %s", result.Name)
+		}
+	}
+	log.Printf("SQL migrations complete: %d applied, %d skipped", applied, len(results)-applied)
 }
 
 func serve(ctx context.Context, cfg config.Config, st *store.Store) error {

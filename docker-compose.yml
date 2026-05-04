@@ -1,36 +1,14 @@
 name: proxy-control-plane
 
 services:
-  postgres:
-    container_name: proxy-control-plane_postgres
-    image: postgres:17-alpine
-    env_file:
-      - ${PCP_POSTGRES_ENV_FILE:-.local/postgres.env}
-    ports:
-      - "127.0.0.1:5432:5432"
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   api:
     container_name: proxy-control-plane_api
     image: proxy-control-plane_api:local
     build: .
-    depends_on:
-      postgres:
-        condition: service_healthy
     env_file:
-      - ${PCP_API_ENV_FILE:-.local/api.docker.env}
+      - ${PCP_APP_ENV_FILE:-.local/app.env}
     ports:
       - "127.0.0.1:9710:9710"
-
-volumes:
-  postgres-data:
-    name: proxy-control-plane_postgres-data
 
 networks:
   default:
