@@ -2,16 +2,14 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"time"
-
-	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/ziyan/proxy-control-plane/internal/domain"
 	"github.com/ziyan/proxy-control-plane/internal/security"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
 var (
@@ -19,42 +17,51 @@ var (
 	ErrConflict = errors.New("conflict")
 )
 
-type SQLStore struct {
-	db *sql.DB
+type Store struct {
+	db *gorm.DB
 }
 
-func Open(ctx context.Context, databaseURL string) (*SQLStore, error) {
-	db, err := sql.Open("pgx", databaseURL)
+func Open(ctx context.Context, databaseURL string) (*Store, error) {
+	db, err := gorm.Open(postgres.Open(databaseURL), &gorm.Config{
+		TranslateError: true,
+	})
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(20)
-	db.SetMaxIdleConns(5)
-	db.SetConnMaxLifetime(30 * time.Minute)
-	if err := db.PingContext(ctx); err != nil {
-		db.Close()
+
+	sqlDB, err := db.DB()
+	if err != nil {
 		return nil, err
 	}
-	return &SQLStore{db: db}, nil
-}
-
-func (s *SQLStore) Close() error {
-	return s.db.Close()
-}
-
-func (s *SQLStore) Ping(ctx context.Context) error {
-	return s.db.PingContext(ctx)
-}
-
-func (s *SQLStore) CreateCustomer(ctx context.Context, customer domain.Customer) (domain.Customer, error) {
-	var existingID string
-	err := s.db.QueryRowContext(ctx, `SELECT id FROM customers WHERE email = $1`, customer.Email).Scan(&existingID)
-	if err == nil {
-		return domain.Customer{}, ErrConflict
+	sqlDB.SetMaxOpenConns(20)
+	sqlDB.SetMaxIdleConns(5)
+	sqlDB.SetConnMaxLifetime(30 * time.Minute)
+	if err := sqlDB.PingContext(ctx); err != nil {
+		sqlDB.Close()
+		return nil, err
 	}
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return domain.Customer{}, err
+
+	return &Store{db: db}, nil
+}
+
+func (s *Store) Close() error {
+	sqlDB, err := s.db.DB()
+	if err != nil {
+		return err
 	}
+	return sqlDB.Close()
+}
+
+func (s *Store) Ping(ctx context.Context) error {
+	sqlDB, err := s.db.DB()
+	if err != nil {
+		return err
+	}
+	return sqlDB.PingContext(ctx)
+}
+
+func (s *Store) CreateCustomer(ctx context.Context, customer domain.Customer) (domain.Customer, error) {
+	var err error
 	if customer.ID == "" {
 		customer.ID, err = security.NewID()
 		if err != nil {
@@ -64,76 +71,43 @@ func (s *SQLStore) CreateCustomer(ctx context.Context, customer domain.Customer)
 	if customer.Status == "" {
 		customer.Status = "active"
 	}
-	return scanCustomer(s.db.QueryRowContext(
-		ctx,
-		`INSERT INTO customers (id, email, display_name, status, expires_at)
-		 VALUES ($1, $2, $3, $4, $5)
-		 RETURNING id, email, display_name, status, expires_at, created_at, updated_at`,
-		customer.ID,
-		customer.Email,
-		nullString(customer.DisplayName),
-		customer.Status,
-		nullTime(customer.ExpiresAt),
-	))
+	if err := s.db.WithContext(ctx).Omit("ProxyAccounts", "SubscriptionTokens").Create(&customer).Error; err != nil {
+		return domain.Customer{}, mapGormError(err)
+	}
+	return customer, nil
 }
 
-func (s *SQLStore) ListCustomers(ctx context.Context) ([]domain.Customer, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, email, display_name, status, expires_at, created_at, updated_at FROM customers ORDER BY created_at DESC`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+func (s *Store) ListCustomers(ctx context.Context) ([]domain.Customer, error) {
 	var customers []domain.Customer
-	for rows.Next() {
-		customer, err := scanCustomer(rows)
-		if err != nil {
-			return nil, err
-		}
-		customers = append(customers, customer)
-	}
-	return customers, rows.Err()
+	err := s.db.WithContext(ctx).Order("created_at DESC").Find(&customers).Error
+	return customers, mapGormError(err)
 }
 
-func (s *SQLStore) GetCustomer(ctx context.Context, id string) (domain.Customer, error) {
-	customer, err := scanCustomer(s.db.QueryRowContext(ctx, `SELECT id, email, display_name, status, expires_at, created_at, updated_at FROM customers WHERE id = $1`, id))
-	if errors.Is(err, sql.ErrNoRows) {
-		return domain.Customer{}, ErrNotFound
+func (s *Store) GetCustomer(ctx context.Context, id string) (domain.Customer, error) {
+	var customer domain.Customer
+	err := s.db.WithContext(ctx).First(&customer, "id = ?", id).Error
+	if err != nil {
+		return domain.Customer{}, mapGormError(err)
 	}
-	return customer, err
+	return customer, nil
 }
 
-func (s *SQLStore) UpdateCustomer(ctx context.Context, customer domain.Customer) (domain.Customer, error) {
-	updated, err := scanCustomer(s.db.QueryRowContext(
-		ctx,
-		`UPDATE customers
-		 SET email = $2, display_name = $3, status = $4, expires_at = $5, updated_at = CURRENT_TIMESTAMP
-		 WHERE id = $1
-		 RETURNING id, email, display_name, status, expires_at, created_at, updated_at`,
-		customer.ID,
-		customer.Email,
-		nullString(customer.DisplayName),
-		customer.Status,
-		nullTime(customer.ExpiresAt),
-	))
-	if errors.Is(err, sql.ErrNoRows) {
-		return domain.Customer{}, ErrNotFound
+func (s *Store) UpdateCustomer(ctx context.Context, customer domain.Customer) (domain.Customer, error) {
+	if _, err := s.GetCustomer(ctx, customer.ID); err != nil {
+		return domain.Customer{}, err
 	}
-	return updated, err
+	if err := s.db.WithContext(ctx).Omit("ProxyAccounts", "SubscriptionTokens").Save(&customer).Error; err != nil {
+		return domain.Customer{}, mapGormError(err)
+	}
+	return s.GetCustomer(ctx, customer.ID)
 }
 
-func (s *SQLStore) DeleteCustomer(ctx context.Context, id string) error {
-	return deleteByID(ctx, s.db, "customers", id)
+func (s *Store) DeleteCustomer(ctx context.Context, id string) error {
+	return deleteByID(ctx, s.db, &domain.Customer{}, id)
 }
 
-func (s *SQLStore) CreateProxyNode(ctx context.Context, node domain.ProxyNode) (domain.ProxyNode, error) {
-	var existingID string
-	err := s.db.QueryRowContext(ctx, `SELECT id FROM proxy_nodes WHERE name = $1`, node.Name).Scan(&existingID)
-	if err == nil {
-		return domain.ProxyNode{}, ErrConflict
-	}
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return domain.ProxyNode{}, err
-	}
+func (s *Store) CreateProxyNode(ctx context.Context, node domain.ProxyNode) (domain.ProxyNode, error) {
+	var err error
 	if node.ID == "" {
 		node.ID, err = security.NewID()
 		if err != nil {
@@ -141,201 +115,150 @@ func (s *SQLStore) CreateProxyNode(ctx context.Context, node domain.ProxyNode) (
 		}
 	}
 	setNodeDefaults(&node)
-	return scanProxyNode(s.db.QueryRowContext(
-		ctx,
-		`INSERT INTO proxy_nodes
-		 (id, name, hostname, public_host, region, protocol, port, transport, security, sni, fingerprint, alpn, path, host_header, reality_public_key, reality_short_id, enabled)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-		 RETURNING id, name, hostname, public_host, region, protocol, port, transport, security, sni, fingerprint, alpn, path, host_header, reality_public_key, reality_short_id, enabled, created_at, updated_at`,
-		node.ID, node.Name, node.Hostname, nullString(node.PublicHost), nullString(node.Region), node.Protocol, node.Port, node.Transport, node.Security,
-		nullString(node.SNI), nullString(node.Fingerprint), nullString(node.ALPN), nullString(node.Path), nullString(node.HostHeader), nullString(node.RealityPublicKey), nullString(node.RealityShortID), node.Enabled,
-	))
+	if err := s.db.WithContext(ctx).Omit("ProxyAccounts").Create(&node).Error; err != nil {
+		return domain.ProxyNode{}, mapGormError(err)
+	}
+	return node, nil
 }
 
-func (s *SQLStore) ListProxyNodes(ctx context.Context) ([]domain.ProxyNode, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, hostname, public_host, region, protocol, port, transport, security, sni, fingerprint, alpn, path, host_header, reality_public_key, reality_short_id, enabled, created_at, updated_at FROM proxy_nodes ORDER BY name`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+func (s *Store) ListProxyNodes(ctx context.Context) ([]domain.ProxyNode, error) {
 	var nodes []domain.ProxyNode
-	for rows.Next() {
-		node, err := scanProxyNode(rows)
-		if err != nil {
-			return nil, err
-		}
-		nodes = append(nodes, node)
-	}
-	return nodes, rows.Err()
+	err := s.db.WithContext(ctx).Order("name ASC").Find(&nodes).Error
+	return nodes, mapGormError(err)
 }
 
-func (s *SQLStore) GetProxyNode(ctx context.Context, id string) (domain.ProxyNode, error) {
-	node, err := scanProxyNode(s.db.QueryRowContext(ctx, `SELECT id, name, hostname, public_host, region, protocol, port, transport, security, sni, fingerprint, alpn, path, host_header, reality_public_key, reality_short_id, enabled, created_at, updated_at FROM proxy_nodes WHERE id = $1`, id))
-	if errors.Is(err, sql.ErrNoRows) {
-		return domain.ProxyNode{}, ErrNotFound
+func (s *Store) GetProxyNode(ctx context.Context, id string) (domain.ProxyNode, error) {
+	var node domain.ProxyNode
+	err := s.db.WithContext(ctx).First(&node, "id = ?", id).Error
+	if err != nil {
+		return domain.ProxyNode{}, mapGormError(err)
 	}
-	return node, err
+	return node, nil
 }
 
-func (s *SQLStore) UpdateProxyNode(ctx context.Context, node domain.ProxyNode) (domain.ProxyNode, error) {
+func (s *Store) UpdateProxyNode(ctx context.Context, node domain.ProxyNode) (domain.ProxyNode, error) {
+	if _, err := s.GetProxyNode(ctx, node.ID); err != nil {
+		return domain.ProxyNode{}, err
+	}
 	setNodeDefaults(&node)
-	updated, err := scanProxyNode(s.db.QueryRowContext(
-		ctx,
-		`UPDATE proxy_nodes
-		 SET name = $2, hostname = $3, public_host = $4, region = $5, protocol = $6, port = $7, transport = $8, security = $9,
-		     sni = $10, fingerprint = $11, alpn = $12, path = $13, host_header = $14, reality_public_key = $15, reality_short_id = $16,
-		     enabled = $17, updated_at = CURRENT_TIMESTAMP
-		 WHERE id = $1
-		 RETURNING id, name, hostname, public_host, region, protocol, port, transport, security, sni, fingerprint, alpn, path, host_header, reality_public_key, reality_short_id, enabled, created_at, updated_at`,
-		node.ID, node.Name, node.Hostname, nullString(node.PublicHost), nullString(node.Region), node.Protocol, node.Port, node.Transport, node.Security,
-		nullString(node.SNI), nullString(node.Fingerprint), nullString(node.ALPN), nullString(node.Path), nullString(node.HostHeader), nullString(node.RealityPublicKey), nullString(node.RealityShortID), node.Enabled,
-	))
-	if errors.Is(err, sql.ErrNoRows) {
-		return domain.ProxyNode{}, ErrNotFound
+	if err := s.db.WithContext(ctx).Omit("ProxyAccounts").Save(&node).Error; err != nil {
+		return domain.ProxyNode{}, mapGormError(err)
 	}
-	return updated, err
+	return s.GetProxyNode(ctx, node.ID)
 }
 
-func (s *SQLStore) DeleteProxyNode(ctx context.Context, id string) error {
-	return deleteByID(ctx, s.db, "proxy_nodes", id)
+func (s *Store) DeleteProxyNode(ctx context.Context, id string) error {
+	return deleteByID(ctx, s.db, &domain.ProxyNode{}, id)
 }
 
-func (s *SQLStore) CreateProxyAccount(ctx context.Context, account domain.ProxyAccount) (domain.ProxyAccount, error) {
+func (s *Store) CreateProxyAccount(ctx context.Context, account domain.ProxyAccount) (domain.ProxyAccount, error) {
 	if _, err := s.GetCustomer(ctx, account.CustomerID); err != nil {
 		return domain.ProxyAccount{}, err
 	}
+
+	var err error
 	if account.ID == "" {
-		id, err := security.NewID()
+		account.ID, err = security.NewID()
 		if err != nil {
 			return domain.ProxyAccount{}, err
 		}
-		account.ID = id
 	}
 	if account.UUID == "" {
-		id, err := security.NewID()
+		account.UUID, err = security.NewID()
 		if err != nil {
 			return domain.ProxyAccount{}, err
 		}
-		account.UUID = id
 	}
 	if account.Protocol == "" {
 		account.Protocol = "vless"
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	nodes, err := s.loadNodesByIDs(ctx, account.NodeIDs)
 	if err != nil {
 		return domain.ProxyAccount{}, err
 	}
-	defer tx.Rollback()
 
-	_, err = tx.ExecContext(
-		ctx,
-		`INSERT INTO proxy_accounts (id, customer_id, protocol, uuid, email_tag, flow, enabled, expires_at, traffic_limit_bytes)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		account.ID, account.CustomerID, account.Protocol, account.UUID, account.EmailTag, nullString(account.Flow), account.Enabled, nullTime(account.ExpiresAt), nullInt64(account.TrafficLimitBytes),
-	)
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Omit("Nodes", "Customer").Create(&account).Error; err != nil {
+			return mapGormError(err)
+		}
+		if len(nodes) > 0 {
+			if err := tx.Model(&account).Association("Nodes").Replace(nodes); err != nil {
+				return mapGormError(err)
+			}
+		}
+		return nil
+	})
 	if err != nil {
-		return domain.ProxyAccount{}, err
-	}
-	if err := replaceAccountNodesTx(ctx, tx, account.ID, account.NodeIDs); err != nil {
-		return domain.ProxyAccount{}, err
-	}
-	if err := tx.Commit(); err != nil {
 		return domain.ProxyAccount{}, err
 	}
 	return s.GetProxyAccount(ctx, account.ID)
 }
 
-func (s *SQLStore) ListProxyAccounts(ctx context.Context) ([]domain.ProxyAccount, error) {
+func (s *Store) ListProxyAccounts(ctx context.Context) ([]domain.ProxyAccount, error) {
 	return s.listProxyAccounts(ctx, "")
 }
 
-func (s *SQLStore) ListProxyAccountsByCustomer(ctx context.Context, customerID string) ([]domain.ProxyAccount, error) {
+func (s *Store) ListProxyAccountsByCustomer(ctx context.Context, customerID string) ([]domain.ProxyAccount, error) {
 	return s.listProxyAccounts(ctx, customerID)
 }
 
-func (s *SQLStore) listProxyAccounts(ctx context.Context, customerID string) ([]domain.ProxyAccount, error) {
-	query := `SELECT id, customer_id, protocol, uuid, email_tag, flow, enabled, expires_at, traffic_limit_bytes, created_at, updated_at FROM proxy_accounts`
-	args := []any{}
-	if customerID != "" {
-		query += ` WHERE customer_id = $1`
-		args = append(args, customerID)
-	}
-	query += ` ORDER BY created_at DESC`
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
+func (s *Store) listProxyAccounts(ctx context.Context, customerID string) ([]domain.ProxyAccount, error) {
 	var accounts []domain.ProxyAccount
-	for rows.Next() {
-		account, err := scanProxyAccount(rows)
-		if err != nil {
-			return nil, err
-		}
-		if err := s.loadAccountNodes(ctx, &account); err != nil {
-			return nil, err
-		}
-		accounts = append(accounts, account)
+	query := s.db.WithContext(ctx).Preload("Nodes").Order("created_at DESC")
+	if customerID != "" {
+		query = query.Where("customer_id = ?", customerID)
 	}
-	return accounts, rows.Err()
+	if err := query.Find(&accounts).Error; err != nil {
+		return nil, mapGormError(err)
+	}
+	for i := range accounts {
+		fillNodeIDs(&accounts[i])
+	}
+	return accounts, nil
 }
 
-func (s *SQLStore) GetProxyAccount(ctx context.Context, id string) (domain.ProxyAccount, error) {
-	account, err := scanProxyAccount(s.db.QueryRowContext(ctx, `SELECT id, customer_id, protocol, uuid, email_tag, flow, enabled, expires_at, traffic_limit_bytes, created_at, updated_at FROM proxy_accounts WHERE id = $1`, id))
-	if errors.Is(err, sql.ErrNoRows) {
-		return domain.ProxyAccount{}, ErrNotFound
-	}
+func (s *Store) GetProxyAccount(ctx context.Context, id string) (domain.ProxyAccount, error) {
+	var account domain.ProxyAccount
+	err := s.db.WithContext(ctx).Preload("Nodes").First(&account, "id = ?", id).Error
 	if err != nil {
-		return domain.ProxyAccount{}, err
+		return domain.ProxyAccount{}, mapGormError(err)
 	}
-	if err := s.loadAccountNodes(ctx, &account); err != nil {
-		return domain.ProxyAccount{}, err
-	}
+	fillNodeIDs(&account)
 	return account, nil
 }
 
-func (s *SQLStore) UpdateProxyAccount(ctx context.Context, account domain.ProxyAccount) (domain.ProxyAccount, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+func (s *Store) UpdateProxyAccount(ctx context.Context, account domain.ProxyAccount) (domain.ProxyAccount, error) {
+	if _, err := s.GetProxyAccount(ctx, account.ID); err != nil {
+		return domain.ProxyAccount{}, err
+	}
+	nodes, err := s.loadNodesByIDs(ctx, account.NodeIDs)
 	if err != nil {
 		return domain.ProxyAccount{}, err
 	}
-	defer tx.Rollback()
-	result, err := tx.ExecContext(
-		ctx,
-		`UPDATE proxy_accounts
-		 SET customer_id = $2, protocol = $3, uuid = $4, email_tag = $5, flow = $6, enabled = $7, expires_at = $8, traffic_limit_bytes = $9,
-		     updated_at = CURRENT_TIMESTAMP
-		 WHERE id = $1`,
-		account.ID, account.CustomerID, account.Protocol, account.UUID, account.EmailTag, nullString(account.Flow), account.Enabled, nullTime(account.ExpiresAt), nullInt64(account.TrafficLimitBytes),
-	)
-	if err != nil {
-		return domain.ProxyAccount{}, err
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return domain.ProxyAccount{}, err
-	}
-	if affected == 0 {
-		return domain.ProxyAccount{}, ErrNotFound
-	}
-	if account.NodeIDs != nil {
-		if err := replaceAccountNodesTx(ctx, tx, account.ID, account.NodeIDs); err != nil {
-			return domain.ProxyAccount{}, err
+
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Omit("Nodes", "Customer").Save(&account).Error; err != nil {
+			return mapGormError(err)
 		}
-	}
-	if err := tx.Commit(); err != nil {
+		if account.NodeIDs != nil {
+			if err := tx.Model(&account).Association("Nodes").Replace(nodes); err != nil {
+				return mapGormError(err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
 		return domain.ProxyAccount{}, err
 	}
 	return s.GetProxyAccount(ctx, account.ID)
 }
 
-func (s *SQLStore) DeleteProxyAccount(ctx context.Context, id string) error {
-	return deleteByID(ctx, s.db, "proxy_accounts", id)
+func (s *Store) DeleteProxyAccount(ctx context.Context, id string) error {
+	return deleteByID(ctx, s.db, &domain.ProxyAccount{}, id)
 }
 
-func (s *SQLStore) CreateSubscriptionToken(ctx context.Context, token domain.SubscriptionToken) (domain.SubscriptionToken, error) {
+func (s *Store) CreateSubscriptionToken(ctx context.Context, token domain.SubscriptionToken) (domain.SubscriptionToken, error) {
 	if _, err := s.GetCustomer(ctx, token.CustomerID); err != nil {
 		return domain.SubscriptionToken{}, err
 	}
@@ -349,97 +272,79 @@ func (s *SQLStore) CreateSubscriptionToken(ctx context.Context, token domain.Sub
 	if token.Name == "" {
 		token.Name = "default"
 	}
-	return scanSubscriptionToken(s.db.QueryRowContext(
-		ctx,
-		`INSERT INTO subscription_tokens (id, customer_id, name, token_hash, enabled, expires_at)
-		 VALUES ($1, $2, $3, $4, $5, $6)
-		 RETURNING id, customer_id, name, token_hash, enabled, expires_at, created_at, updated_at, last_used_at, last_used_ip, last_used_user_agent`,
-		token.ID, token.CustomerID, token.Name, token.TokenHash, token.Enabled, nullTime(token.ExpiresAt),
-	))
+	if err := s.db.WithContext(ctx).Omit("Customer").Create(&token).Error; err != nil {
+		return domain.SubscriptionToken{}, mapGormError(err)
+	}
+	return token, nil
 }
 
-func (s *SQLStore) ListSubscriptionTokens(ctx context.Context, customerID string) ([]domain.SubscriptionToken, error) {
-	query := `SELECT id, customer_id, name, token_hash, enabled, expires_at, created_at, updated_at, last_used_at, last_used_ip, last_used_user_agent FROM subscription_tokens`
-	args := []any{}
-	if customerID != "" {
-		query += ` WHERE customer_id = $1`
-		args = append(args, customerID)
-	}
-	query += ` ORDER BY created_at DESC`
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+func (s *Store) ListSubscriptionTokens(ctx context.Context, customerID string) ([]domain.SubscriptionToken, error) {
 	var tokens []domain.SubscriptionToken
-	for rows.Next() {
-		token, err := scanSubscriptionToken(rows)
-		if err != nil {
-			return nil, err
-		}
-		tokens = append(tokens, token)
+	query := s.db.WithContext(ctx).Order("created_at DESC")
+	if customerID != "" {
+		query = query.Where("customer_id = ?", customerID)
 	}
-	return tokens, rows.Err()
+	err := query.Find(&tokens).Error
+	return tokens, mapGormError(err)
 }
 
-func (s *SQLStore) GetSubscriptionToken(ctx context.Context, id string) (domain.SubscriptionToken, error) {
-	token, err := scanSubscriptionToken(s.db.QueryRowContext(ctx, `SELECT id, customer_id, name, token_hash, enabled, expires_at, created_at, updated_at, last_used_at, last_used_ip, last_used_user_agent FROM subscription_tokens WHERE id = $1`, id))
-	if errors.Is(err, sql.ErrNoRows) {
+func (s *Store) GetSubscriptionToken(ctx context.Context, id string) (domain.SubscriptionToken, error) {
+	var token domain.SubscriptionToken
+	err := s.db.WithContext(ctx).First(&token, "id = ?", id).Error
+	if err != nil {
+		return domain.SubscriptionToken{}, mapGormError(err)
+	}
+	return token, nil
+}
+
+func (s *Store) GetSubscriptionTokenByHash(ctx context.Context, tokenHash string) (domain.SubscriptionToken, error) {
+	var token domain.SubscriptionToken
+	err := s.db.WithContext(ctx).First(&token, "token_hash = ?", tokenHash).Error
+	if err != nil {
+		return domain.SubscriptionToken{}, mapGormError(err)
+	}
+	return token, nil
+}
+
+func (s *Store) UpdateSubscriptionToken(ctx context.Context, token domain.SubscriptionToken) (domain.SubscriptionToken, error) {
+	if _, err := s.GetSubscriptionToken(ctx, token.ID); err != nil {
+		return domain.SubscriptionToken{}, err
+	}
+	if err := s.db.WithContext(ctx).Omit("Customer").Save(&token).Error; err != nil {
+		return domain.SubscriptionToken{}, mapGormError(err)
+	}
+	return s.GetSubscriptionToken(ctx, token.ID)
+}
+
+func (s *Store) RotateSubscriptionToken(ctx context.Context, id string, tokenHash string) (domain.SubscriptionToken, error) {
+	result := s.db.WithContext(ctx).Model(&domain.SubscriptionToken{}).
+		Where("id = ?", id).
+		Updates(map[string]any{
+			"token_hash":           tokenHash,
+			"last_used_at":         nil,
+			"last_used_ip":         "",
+			"last_used_user_agent": "",
+		})
+	if err := mapGormError(result.Error); err != nil {
+		return domain.SubscriptionToken{}, err
+	}
+	if result.RowsAffected == 0 {
 		return domain.SubscriptionToken{}, ErrNotFound
 	}
-	return token, err
+	return s.GetSubscriptionToken(ctx, id)
 }
 
-func (s *SQLStore) GetSubscriptionTokenByHash(ctx context.Context, tokenHash string) (domain.SubscriptionToken, error) {
-	token, err := scanSubscriptionToken(s.db.QueryRowContext(ctx, `SELECT id, customer_id, name, token_hash, enabled, expires_at, created_at, updated_at, last_used_at, last_used_ip, last_used_user_agent FROM subscription_tokens WHERE token_hash = $1`, tokenHash))
-	if errors.Is(err, sql.ErrNoRows) {
-		return domain.SubscriptionToken{}, ErrNotFound
-	}
-	return token, err
+func (s *Store) MarkSubscriptionUsed(ctx context.Context, id string, ip string, userAgent string) error {
+	return mapGormError(s.db.WithContext(ctx).Model(&domain.SubscriptionToken{}).
+		Where("id = ?", id).
+		Updates(map[string]any{
+			"last_used_at":         time.Now().UTC(),
+			"last_used_ip":         ip,
+			"last_used_user_agent": userAgent,
+		}).Error)
 }
 
-func (s *SQLStore) UpdateSubscriptionToken(ctx context.Context, token domain.SubscriptionToken) (domain.SubscriptionToken, error) {
-	updated, err := scanSubscriptionToken(s.db.QueryRowContext(
-		ctx,
-		`UPDATE subscription_tokens
-		 SET name = $2, enabled = $3, expires_at = $4, updated_at = CURRENT_TIMESTAMP
-		 WHERE id = $1
-		 RETURNING id, customer_id, name, token_hash, enabled, expires_at, created_at, updated_at, last_used_at, last_used_ip, last_used_user_agent`,
-		token.ID, token.Name, token.Enabled, nullTime(token.ExpiresAt),
-	))
-	if errors.Is(err, sql.ErrNoRows) {
-		return domain.SubscriptionToken{}, ErrNotFound
-	}
-	return updated, err
-}
-
-func (s *SQLStore) RotateSubscriptionToken(ctx context.Context, id string, tokenHash string) (domain.SubscriptionToken, error) {
-	updated, err := scanSubscriptionToken(s.db.QueryRowContext(
-		ctx,
-		`UPDATE subscription_tokens
-		 SET token_hash = $2, updated_at = CURRENT_TIMESTAMP, last_used_at = NULL, last_used_ip = NULL, last_used_user_agent = NULL
-		 WHERE id = $1
-		 RETURNING id, customer_id, name, token_hash, enabled, expires_at, created_at, updated_at, last_used_at, last_used_ip, last_used_user_agent`,
-		id, tokenHash,
-	))
-	if errors.Is(err, sql.ErrNoRows) {
-		return domain.SubscriptionToken{}, ErrNotFound
-	}
-	return updated, err
-}
-
-func (s *SQLStore) MarkSubscriptionUsed(ctx context.Context, id string, ip string, userAgent string) error {
-	_, err := s.db.ExecContext(
-		ctx,
-		`UPDATE subscription_tokens
-		 SET last_used_at = CURRENT_TIMESTAMP, last_used_ip = $2, last_used_user_agent = $3
-		 WHERE id = $1`,
-		id, nullString(ip), nullString(userAgent),
-	)
-	return err
-}
-
-func (s *SQLStore) RecordTrafficUsage(ctx context.Context, usage domain.TrafficUsage) (domain.TrafficUsage, error) {
+func (s *Store) RecordTrafficUsage(ctx context.Context, usage domain.TrafficUsage) (domain.TrafficUsage, error) {
 	var err error
 	if usage.ID == "" {
 		usage.ID, err = security.NewID()
@@ -450,38 +355,41 @@ func (s *SQLStore) RecordTrafficUsage(ctx context.Context, usage domain.TrafficU
 	if usage.RecordedAt.IsZero() {
 		usage.RecordedAt = time.Now().UTC()
 	}
-	return scanTrafficUsage(s.db.QueryRowContext(
-		ctx,
-		`INSERT INTO traffic_usage (id, proxy_account_id, proxy_node_id, upload_bytes, download_bytes, recorded_at)
-		 VALUES ($1, $2, $3, $4, $5, $6)
-		 RETURNING id, proxy_account_id, proxy_node_id, upload_bytes, download_bytes, recorded_at`,
-		usage.ID, usage.ProxyAccountID, usage.ProxyNodeID, usage.UploadBytes, usage.DownloadBytes, usage.RecordedAt,
-	))
+	if err := s.db.WithContext(ctx).Omit("ProxyAccount", "ProxyNode").Create(&usage).Error; err != nil {
+		return domain.TrafficUsage{}, mapGormError(err)
+	}
+	return usage, nil
 }
 
-func (s *SQLStore) WriteAudit(ctx context.Context, actor string, action string, metadata any) error {
+func (s *Store) WriteAudit(ctx context.Context, actor string, action string, metadata any) error {
 	id, err := security.NewID()
 	if err != nil {
 		return err
 	}
 	metadataJSON := ""
 	if metadata != nil {
-		switch v := metadata.(type) {
+		switch value := metadata.(type) {
 		case string:
-			metadataJSON = v
+			metadataJSON = value
 		default:
-			data, err := json.Marshal(v)
+			data, err := json.Marshal(value)
 			if err != nil {
 				return err
 			}
 			metadataJSON = string(data)
 		}
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO audit_logs (id, actor, action, metadata_json) VALUES ($1, $2, $3, $4)`, id, nullString(actor), action, nullString(metadataJSON))
-	return err
+	audit := domain.AuditLog{
+		ID:           id,
+		Actor:        actor,
+		Action:       action,
+		MetadataJSON: metadataJSON,
+		CreatedAt:    time.Now().UTC(),
+	}
+	return mapGormError(s.db.WithContext(ctx).Create(&audit).Error)
 }
 
-func (s *SQLStore) SubscriptionData(ctx context.Context, customerID string) (domain.Customer, []domain.ProxyAccount, error) {
+func (s *Store) SubscriptionData(ctx context.Context, customerID string) (domain.Customer, []domain.ProxyAccount, error) {
 	customer, err := s.GetCustomer(ctx, customerID)
 	if err != nil {
 		return domain.Customer{}, nil, err
@@ -508,186 +416,50 @@ func setNodeDefaults(node *domain.ProxyNode) {
 	}
 }
 
-func replaceAccountNodesTx(ctx context.Context, tx *sql.Tx, accountID string, nodeIDs []string) error {
+func (s *Store) loadNodesByIDs(ctx context.Context, nodeIDs []string) ([]domain.ProxyNode, error) {
 	nodeIDs = uniqueStrings(nodeIDs)
-	for _, nodeID := range nodeIDs {
-		var exists string
-		err := tx.QueryRowContext(ctx, `SELECT id FROM proxy_nodes WHERE id = $1`, nodeID).Scan(&exists)
-		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("%w: proxy node %s", ErrNotFound, nodeID)
-		}
-		if err != nil {
-			return err
-		}
+	if len(nodeIDs) == 0 {
+		return nil, nil
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM proxy_account_nodes WHERE proxy_account_id = $1`, accountID); err != nil {
-		return err
+	var nodes []domain.ProxyNode
+	if err := s.db.WithContext(ctx).Where("id IN ?", nodeIDs).Find(&nodes).Error; err != nil {
+		return nil, mapGormError(err)
 	}
-	for _, nodeID := range nodeIDs {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO proxy_account_nodes (proxy_account_id, proxy_node_id) VALUES ($1, $2)`, accountID, nodeID); err != nil {
-			return err
-		}
+	if len(nodes) != len(nodeIDs) {
+		return nil, ErrNotFound
 	}
-	return nil
+	return nodes, nil
 }
 
-func (s *SQLStore) loadAccountNodes(ctx context.Context, account *domain.ProxyAccount) error {
-	rows, err := s.db.QueryContext(
-		ctx,
-		`SELECT n.id, n.name, n.hostname, n.public_host, n.region, n.protocol, n.port, n.transport, n.security,
-		        n.sni, n.fingerprint, n.alpn, n.path, n.host_header, n.reality_public_key, n.reality_short_id,
-		        n.enabled, n.created_at, n.updated_at
-		 FROM proxy_nodes n
-		 JOIN proxy_account_nodes an ON an.proxy_node_id = n.id
-		 WHERE an.proxy_account_id = $1
-		 ORDER BY n.name`,
-		account.ID,
-	)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	account.NodeIDs = nil
-	account.Nodes = nil
-	for rows.Next() {
-		node, err := scanProxyNode(rows)
-		if err != nil {
-			return err
-		}
+func fillNodeIDs(account *domain.ProxyAccount) {
+	account.NodeIDs = make([]string, 0, len(account.Nodes))
+	for _, node := range account.Nodes {
 		account.NodeIDs = append(account.NodeIDs, node.ID)
-		account.Nodes = append(account.Nodes, node)
 	}
-	return rows.Err()
 }
 
-type scanner interface {
-	Scan(dest ...any) error
-}
-
-func scanCustomer(row scanner) (domain.Customer, error) {
-	var customer domain.Customer
-	var displayName sql.NullString
-	var expiresAt sql.NullTime
-	if err := row.Scan(&customer.ID, &customer.Email, &displayName, &customer.Status, &expiresAt, &customer.CreatedAt, &customer.UpdatedAt); err != nil {
-		return domain.Customer{}, err
-	}
-	customer.DisplayName = stringFromNull(displayName)
-	customer.ExpiresAt = timeFromNull(expiresAt)
-	return customer, nil
-}
-
-func scanProxyNode(row scanner) (domain.ProxyNode, error) {
-	var node domain.ProxyNode
-	var publicHost, region, sni, fingerprint, alpn, path, hostHeader, realityPublicKey, realityShortID sql.NullString
-	if err := row.Scan(
-		&node.ID, &node.Name, &node.Hostname, &publicHost, &region, &node.Protocol, &node.Port, &node.Transport, &node.Security,
-		&sni, &fingerprint, &alpn, &path, &hostHeader, &realityPublicKey, &realityShortID,
-		&node.Enabled, &node.CreatedAt, &node.UpdatedAt,
-	); err != nil {
-		return domain.ProxyNode{}, err
-	}
-	node.PublicHost = stringFromNull(publicHost)
-	node.Region = stringFromNull(region)
-	node.SNI = stringFromNull(sni)
-	node.Fingerprint = stringFromNull(fingerprint)
-	node.ALPN = stringFromNull(alpn)
-	node.Path = stringFromNull(path)
-	node.HostHeader = stringFromNull(hostHeader)
-	node.RealityPublicKey = stringFromNull(realityPublicKey)
-	node.RealityShortID = stringFromNull(realityShortID)
-	return node, nil
-}
-
-func scanProxyAccount(row scanner) (domain.ProxyAccount, error) {
-	var account domain.ProxyAccount
-	var flow sql.NullString
-	var expiresAt sql.NullTime
-	var trafficLimit sql.NullInt64
-	if err := row.Scan(&account.ID, &account.CustomerID, &account.Protocol, &account.UUID, &account.EmailTag, &flow, &account.Enabled, &expiresAt, &trafficLimit, &account.CreatedAt, &account.UpdatedAt); err != nil {
-		return domain.ProxyAccount{}, err
-	}
-	account.Flow = stringFromNull(flow)
-	account.ExpiresAt = timeFromNull(expiresAt)
-	account.TrafficLimitBytes = int64FromNull(trafficLimit)
-	return account, nil
-}
-
-func scanSubscriptionToken(row scanner) (domain.SubscriptionToken, error) {
-	var token domain.SubscriptionToken
-	var expiresAt, lastUsedAt sql.NullTime
-	var lastUsedIP, lastUsedUserAgent sql.NullString
-	if err := row.Scan(&token.ID, &token.CustomerID, &token.Name, &token.TokenHash, &token.Enabled, &expiresAt, &token.CreatedAt, &token.UpdatedAt, &lastUsedAt, &lastUsedIP, &lastUsedUserAgent); err != nil {
-		return domain.SubscriptionToken{}, err
-	}
-	token.ExpiresAt = timeFromNull(expiresAt)
-	token.LastUsedAt = timeFromNull(lastUsedAt)
-	token.LastUsedIP = stringFromNull(lastUsedIP)
-	token.LastUsedUserAgent = stringFromNull(lastUsedUserAgent)
-	return token, nil
-}
-
-func scanTrafficUsage(row scanner) (domain.TrafficUsage, error) {
-	var usage domain.TrafficUsage
-	if err := row.Scan(&usage.ID, &usage.ProxyAccountID, &usage.ProxyNodeID, &usage.UploadBytes, &usage.DownloadBytes, &usage.RecordedAt); err != nil {
-		return domain.TrafficUsage{}, err
-	}
-	return usage, nil
-}
-
-func deleteByID(ctx context.Context, db *sql.DB, table string, id string) error {
-	result, err := db.ExecContext(ctx, `DELETE FROM `+table+` WHERE id = $1`, id)
-	if err != nil {
+func deleteByID(ctx context.Context, db *gorm.DB, model any, id string) error {
+	result := db.WithContext(ctx).Delete(model, "id = ?", id)
+	if err := mapGormError(result.Error); err != nil {
 		return err
 	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected == 0 {
+	if result.RowsAffected == 0 {
 		return ErrNotFound
 	}
 	return nil
 }
 
-func nullString(value string) sql.NullString {
-	return sql.NullString{String: value, Valid: value != ""}
-}
-
-func stringFromNull(value sql.NullString) string {
-	if !value.Valid {
-		return ""
-	}
-	return value.String
-}
-
-func nullTime(value *time.Time) sql.NullTime {
-	if value == nil {
-		return sql.NullTime{}
-	}
-	return sql.NullTime{Time: value.UTC(), Valid: true}
-}
-
-func timeFromNull(value sql.NullTime) *time.Time {
-	if !value.Valid {
+func mapGormError(err error) error {
+	if err == nil {
 		return nil
 	}
-	t := value.Time.UTC()
-	return &t
-}
-
-func nullInt64(value *int64) sql.NullInt64 {
-	if value == nil {
-		return sql.NullInt64{}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return ErrNotFound
 	}
-	return sql.NullInt64{Int64: *value, Valid: true}
-}
-
-func int64FromNull(value sql.NullInt64) *int64 {
-	if !value.Valid {
-		return nil
+	if errors.Is(err, gorm.ErrDuplicatedKey) {
+		return ErrConflict
 	}
-	v := value.Int64
-	return &v
+	return err
 }
 
 func uniqueStrings(values []string) []string {

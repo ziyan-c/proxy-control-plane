@@ -1,14 +1,13 @@
 package httpapi
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/ziyan/proxy-control-plane/internal/config"
 	"github.com/ziyan/proxy-control-plane/internal/domain"
 	"github.com/ziyan/proxy-control-plane/internal/security"
@@ -18,63 +17,61 @@ import (
 
 type Server struct {
 	cfg   config.Config
-	store *store.SQLStore
-	mux   *http.ServeMux
+	store *store.Store
 }
 
-type contextKey string
+func New(cfg config.Config, st *store.Store) http.Handler {
+	gin.SetMode(gin.ReleaseMode)
+	router := gin.New()
+	router.Use(gin.Logger(), gin.Recovery())
 
-const actorKey contextKey = "actor"
-
-func New(cfg config.Config, st *store.SQLStore) http.Handler {
 	server := &Server{
 		cfg:   cfg,
 		store: st,
-		mux:   http.NewServeMux(),
 	}
-	server.routes()
-	return server.mux
+	server.routes(router)
+	return router
 }
 
-func (s *Server) routes() {
-	s.mux.HandleFunc("GET /health", s.health)
-	s.mux.HandleFunc("POST /admin/login", s.login)
+func (s *Server) routes(router *gin.Engine) {
+	router.GET("/health", s.health)
+	router.POST("/admin/login", s.login)
+	router.GET("/sub/:token", s.getSubscription)
 
-	s.mux.Handle("GET /admin/customers", s.requireAdmin(http.HandlerFunc(s.listCustomers)))
-	s.mux.Handle("POST /admin/customers", s.requireAdmin(http.HandlerFunc(s.createCustomer)))
-	s.mux.Handle("GET /admin/customers/{id}", s.requireAdmin(http.HandlerFunc(s.getCustomer)))
-	s.mux.Handle("PATCH /admin/customers/{id}", s.requireAdmin(http.HandlerFunc(s.updateCustomer)))
-	s.mux.Handle("DELETE /admin/customers/{id}", s.requireAdmin(http.HandlerFunc(s.deleteCustomer)))
+	admin := router.Group("/admin", s.requireAdmin())
+	admin.GET("/customers", s.listCustomers)
+	admin.POST("/customers", s.createCustomer)
+	admin.GET("/customers/:id", s.getCustomer)
+	admin.PATCH("/customers/:id", s.updateCustomer)
+	admin.DELETE("/customers/:id", s.deleteCustomer)
 
-	s.mux.Handle("GET /admin/nodes", s.requireAdmin(http.HandlerFunc(s.listNodes)))
-	s.mux.Handle("POST /admin/nodes", s.requireAdmin(http.HandlerFunc(s.createNode)))
-	s.mux.Handle("GET /admin/nodes/{id}", s.requireAdmin(http.HandlerFunc(s.getNode)))
-	s.mux.Handle("PATCH /admin/nodes/{id}", s.requireAdmin(http.HandlerFunc(s.updateNode)))
-	s.mux.Handle("DELETE /admin/nodes/{id}", s.requireAdmin(http.HandlerFunc(s.deleteNode)))
+	admin.GET("/nodes", s.listNodes)
+	admin.POST("/nodes", s.createNode)
+	admin.GET("/nodes/:id", s.getNode)
+	admin.PATCH("/nodes/:id", s.updateNode)
+	admin.DELETE("/nodes/:id", s.deleteNode)
 
-	s.mux.Handle("GET /admin/proxy-accounts", s.requireAdmin(http.HandlerFunc(s.listProxyAccounts)))
-	s.mux.Handle("POST /admin/proxy-accounts", s.requireAdmin(http.HandlerFunc(s.createProxyAccount)))
-	s.mux.Handle("GET /admin/proxy-accounts/{id}", s.requireAdmin(http.HandlerFunc(s.getProxyAccount)))
-	s.mux.Handle("PATCH /admin/proxy-accounts/{id}", s.requireAdmin(http.HandlerFunc(s.updateProxyAccount)))
-	s.mux.Handle("DELETE /admin/proxy-accounts/{id}", s.requireAdmin(http.HandlerFunc(s.deleteProxyAccount)))
+	admin.GET("/proxy-accounts", s.listProxyAccounts)
+	admin.POST("/proxy-accounts", s.createProxyAccount)
+	admin.GET("/proxy-accounts/:id", s.getProxyAccount)
+	admin.PATCH("/proxy-accounts/:id", s.updateProxyAccount)
+	admin.DELETE("/proxy-accounts/:id", s.deleteProxyAccount)
 
-	s.mux.Handle("GET /admin/subscription-tokens", s.requireAdmin(http.HandlerFunc(s.listSubscriptionTokens)))
-	s.mux.Handle("POST /admin/subscription-tokens", s.requireAdmin(http.HandlerFunc(s.createSubscriptionToken)))
-	s.mux.Handle("GET /admin/subscription-tokens/{id}", s.requireAdmin(http.HandlerFunc(s.getSubscriptionToken)))
-	s.mux.Handle("PATCH /admin/subscription-tokens/{id}", s.requireAdmin(http.HandlerFunc(s.updateSubscriptionToken)))
-	s.mux.Handle("POST /admin/subscription-tokens/{id}/rotate", s.requireAdmin(http.HandlerFunc(s.rotateSubscriptionToken)))
+	admin.GET("/subscription-tokens", s.listSubscriptionTokens)
+	admin.POST("/subscription-tokens", s.createSubscriptionToken)
+	admin.GET("/subscription-tokens/:id", s.getSubscriptionToken)
+	admin.PATCH("/subscription-tokens/:id", s.updateSubscriptionToken)
+	admin.POST("/subscription-tokens/:id/rotate", s.rotateSubscriptionToken)
 
-	s.mux.Handle("POST /admin/traffic-usage", s.requireAdmin(http.HandlerFunc(s.recordTrafficUsage)))
-
-	s.mux.HandleFunc("GET /sub/{token}", s.getSubscription)
+	admin.POST("/traffic-usage", s.recordTrafficUsage)
 }
 
-func (s *Server) health(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.Ping(r.Context()); err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "error"})
+func (s *Server) health(c *gin.Context) {
+	if err := s.store.Ping(c.Request.Context()); err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "error"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
 type loginRequest struct {
@@ -82,21 +79,21 @@ type loginRequest struct {
 	Password string `json:"password"`
 }
 
-func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+func (s *Server) login(c *gin.Context) {
 	var req loginRequest
-	if !decodeJSON(w, r, &req) {
+	if !bindJSON(c, &req) {
 		return
 	}
 	if req.Email != s.cfg.AdminEmail || !security.VerifyPassword(req.Password, s.cfg.AdminPassword) {
-		writeError(w, http.StatusUnauthorized, "invalid credentials")
+		writeError(c, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
 	token, err := security.CreateAccessToken(req.Email, s.cfg.SecretKey, s.cfg.AccessTokenTTL())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not create access token")
+		writeError(c, http.StatusInternalServerError, "could not create access token")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"access_token": token, "token_type": "bearer"})
+	c.JSON(http.StatusOK, gin.H{"access_token": token, "token_type": "bearer"})
 }
 
 type customerRequest struct {
@@ -113,54 +110,54 @@ type customerPatch struct {
 	ExpiresAt   *time.Time `json:"expires_at"`
 }
 
-func (s *Server) createCustomer(w http.ResponseWriter, r *http.Request) {
+func (s *Server) createCustomer(c *gin.Context) {
 	var req customerRequest
-	if !decodeJSON(w, r, &req) {
+	if !bindJSON(c, &req) {
 		return
 	}
 	if req.Email == "" {
-		writeError(w, http.StatusBadRequest, "email is required")
+		writeError(c, http.StatusBadRequest, "email is required")
 		return
 	}
 	if req.Status == "" {
 		req.Status = "active"
 	}
-	customer, err := s.store.CreateCustomer(r.Context(), domain.Customer{
+	customer, err := s.store.CreateCustomer(c.Request.Context(), domain.Customer{
 		Email:       req.Email,
 		DisplayName: req.DisplayName,
 		Status:      req.Status,
 		ExpiresAt:   req.ExpiresAt,
 	})
-	if handleStoreError(w, err) {
+	if handleStoreError(c, err) {
 		return
 	}
-	s.audit(r, "customer.created", customer.ID)
-	writeJSON(w, http.StatusCreated, customer)
+	s.audit(c, "customer.created", customer.ID)
+	c.JSON(http.StatusCreated, customer)
 }
 
-func (s *Server) listCustomers(w http.ResponseWriter, r *http.Request) {
-	customers, err := s.store.ListCustomers(r.Context())
-	if handleStoreError(w, err) {
+func (s *Server) listCustomers(c *gin.Context) {
+	customers, err := s.store.ListCustomers(c.Request.Context())
+	if handleStoreError(c, err) {
 		return
 	}
-	writeJSON(w, http.StatusOK, customers)
+	c.JSON(http.StatusOK, customers)
 }
 
-func (s *Server) getCustomer(w http.ResponseWriter, r *http.Request) {
-	customer, err := s.store.GetCustomer(r.Context(), r.PathValue("id"))
-	if handleStoreError(w, err) {
+func (s *Server) getCustomer(c *gin.Context) {
+	customer, err := s.store.GetCustomer(c.Request.Context(), c.Param("id"))
+	if handleStoreError(c, err) {
 		return
 	}
-	writeJSON(w, http.StatusOK, customer)
+	c.JSON(http.StatusOK, customer)
 }
 
-func (s *Server) updateCustomer(w http.ResponseWriter, r *http.Request) {
-	current, err := s.store.GetCustomer(r.Context(), r.PathValue("id"))
-	if handleStoreError(w, err) {
+func (s *Server) updateCustomer(c *gin.Context) {
+	current, err := s.store.GetCustomer(c.Request.Context(), c.Param("id"))
+	if handleStoreError(c, err) {
 		return
 	}
 	var req customerPatch
-	if !decodeJSON(w, r, &req) {
+	if !bindJSON(c, &req) {
 		return
 	}
 	if req.Email != nil {
@@ -175,20 +172,20 @@ func (s *Server) updateCustomer(w http.ResponseWriter, r *http.Request) {
 	if req.ExpiresAt != nil {
 		current.ExpiresAt = req.ExpiresAt
 	}
-	updated, err := s.store.UpdateCustomer(r.Context(), current)
-	if handleStoreError(w, err) {
+	updated, err := s.store.UpdateCustomer(c.Request.Context(), current)
+	if handleStoreError(c, err) {
 		return
 	}
-	s.audit(r, "customer.updated", updated.ID)
-	writeJSON(w, http.StatusOK, updated)
+	s.audit(c, "customer.updated", updated.ID)
+	c.JSON(http.StatusOK, updated)
 }
 
-func (s *Server) deleteCustomer(w http.ResponseWriter, r *http.Request) {
-	if handleStoreError(w, s.store.DeleteCustomer(r.Context(), r.PathValue("id"))) {
+func (s *Server) deleteCustomer(c *gin.Context) {
+	if handleStoreError(c, s.store.DeleteCustomer(c.Request.Context(), c.Param("id"))) {
 		return
 	}
-	s.audit(r, "customer.deleted", r.PathValue("id"))
-	w.WriteHeader(http.StatusNoContent)
+	s.audit(c, "customer.deleted", c.Param("id"))
+	c.Status(http.StatusNoContent)
 }
 
 type nodeRequest struct {
@@ -212,20 +209,20 @@ type nodeRequest struct {
 
 type nodePatch = nodeRequest
 
-func (s *Server) createNode(w http.ResponseWriter, r *http.Request) {
+func (s *Server) createNode(c *gin.Context) {
 	var req nodeRequest
-	if !decodeJSON(w, r, &req) {
+	if !bindJSON(c, &req) {
 		return
 	}
 	if req.Name == "" || req.Hostname == "" {
-		writeError(w, http.StatusBadRequest, "name and hostname are required")
+		writeError(c, http.StatusBadRequest, "name and hostname are required")
 		return
 	}
 	enabled := true
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
-	node, err := s.store.CreateProxyNode(r.Context(), domain.ProxyNode{
+	node, err := s.store.CreateProxyNode(c.Request.Context(), domain.ProxyNode{
 		Name:             req.Name,
 		Hostname:         req.Hostname,
 		PublicHost:       req.PublicHost,
@@ -243,53 +240,53 @@ func (s *Server) createNode(w http.ResponseWriter, r *http.Request) {
 		RealityShortID:   req.RealityShortID,
 		Enabled:          enabled,
 	})
-	if handleStoreError(w, err) {
+	if handleStoreError(c, err) {
 		return
 	}
-	s.audit(r, "proxy_node.created", node.ID)
-	writeJSON(w, http.StatusCreated, node)
+	s.audit(c, "proxy_node.created", node.ID)
+	c.JSON(http.StatusCreated, node)
 }
 
-func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
-	nodes, err := s.store.ListProxyNodes(r.Context())
-	if handleStoreError(w, err) {
+func (s *Server) listNodes(c *gin.Context) {
+	nodes, err := s.store.ListProxyNodes(c.Request.Context())
+	if handleStoreError(c, err) {
 		return
 	}
-	writeJSON(w, http.StatusOK, nodes)
+	c.JSON(http.StatusOK, nodes)
 }
 
-func (s *Server) getNode(w http.ResponseWriter, r *http.Request) {
-	node, err := s.store.GetProxyNode(r.Context(), r.PathValue("id"))
-	if handleStoreError(w, err) {
+func (s *Server) getNode(c *gin.Context) {
+	node, err := s.store.GetProxyNode(c.Request.Context(), c.Param("id"))
+	if handleStoreError(c, err) {
 		return
 	}
-	writeJSON(w, http.StatusOK, node)
+	c.JSON(http.StatusOK, node)
 }
 
-func (s *Server) updateNode(w http.ResponseWriter, r *http.Request) {
-	current, err := s.store.GetProxyNode(r.Context(), r.PathValue("id"))
-	if handleStoreError(w, err) {
+func (s *Server) updateNode(c *gin.Context) {
+	current, err := s.store.GetProxyNode(c.Request.Context(), c.Param("id"))
+	if handleStoreError(c, err) {
 		return
 	}
 	var req nodePatch
-	if !decodeJSON(w, r, &req) {
+	if !bindJSON(c, &req) {
 		return
 	}
 	applyNodePatch(&current, req)
-	updated, err := s.store.UpdateProxyNode(r.Context(), current)
-	if handleStoreError(w, err) {
+	updated, err := s.store.UpdateProxyNode(c.Request.Context(), current)
+	if handleStoreError(c, err) {
 		return
 	}
-	s.audit(r, "proxy_node.updated", updated.ID)
-	writeJSON(w, http.StatusOK, updated)
+	s.audit(c, "proxy_node.updated", updated.ID)
+	c.JSON(http.StatusOK, updated)
 }
 
-func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request) {
-	if handleStoreError(w, s.store.DeleteProxyNode(r.Context(), r.PathValue("id"))) {
+func (s *Server) deleteNode(c *gin.Context) {
+	if handleStoreError(c, s.store.DeleteProxyNode(c.Request.Context(), c.Param("id"))) {
 		return
 	}
-	s.audit(r, "proxy_node.deleted", r.PathValue("id"))
-	w.WriteHeader(http.StatusNoContent)
+	s.audit(c, "proxy_node.deleted", c.Param("id"))
+	c.Status(http.StatusNoContent)
 }
 
 type proxyAccountRequest struct {
@@ -316,20 +313,20 @@ type proxyAccountPatch struct {
 	NodeIDs           *[]string  `json:"node_ids"`
 }
 
-func (s *Server) createProxyAccount(w http.ResponseWriter, r *http.Request) {
+func (s *Server) createProxyAccount(c *gin.Context) {
 	var req proxyAccountRequest
-	if !decodeJSON(w, r, &req) {
+	if !bindJSON(c, &req) {
 		return
 	}
 	if req.CustomerID == "" || req.EmailTag == "" {
-		writeError(w, http.StatusBadRequest, "customer_id and email_tag are required")
+		writeError(c, http.StatusBadRequest, "customer_id and email_tag are required")
 		return
 	}
 	enabled := true
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
-	account, err := s.store.CreateProxyAccount(r.Context(), domain.ProxyAccount{
+	account, err := s.store.CreateProxyAccount(c.Request.Context(), domain.ProxyAccount{
 		CustomerID:        req.CustomerID,
 		Protocol:          req.Protocol,
 		UUID:              req.UUID,
@@ -340,36 +337,36 @@ func (s *Server) createProxyAccount(w http.ResponseWriter, r *http.Request) {
 		TrafficLimitBytes: req.TrafficLimitBytes,
 		NodeIDs:           req.NodeIDs,
 	})
-	if handleStoreError(w, err) {
+	if handleStoreError(c, err) {
 		return
 	}
-	s.audit(r, "proxy_account.created", account.ID)
-	writeJSON(w, http.StatusCreated, account)
+	s.audit(c, "proxy_account.created", account.ID)
+	c.JSON(http.StatusCreated, account)
 }
 
-func (s *Server) listProxyAccounts(w http.ResponseWriter, r *http.Request) {
-	accounts, err := s.store.ListProxyAccounts(r.Context())
-	if handleStoreError(w, err) {
+func (s *Server) listProxyAccounts(c *gin.Context) {
+	accounts, err := s.store.ListProxyAccounts(c.Request.Context())
+	if handleStoreError(c, err) {
 		return
 	}
-	writeJSON(w, http.StatusOK, accounts)
+	c.JSON(http.StatusOK, accounts)
 }
 
-func (s *Server) getProxyAccount(w http.ResponseWriter, r *http.Request) {
-	account, err := s.store.GetProxyAccount(r.Context(), r.PathValue("id"))
-	if handleStoreError(w, err) {
+func (s *Server) getProxyAccount(c *gin.Context) {
+	account, err := s.store.GetProxyAccount(c.Request.Context(), c.Param("id"))
+	if handleStoreError(c, err) {
 		return
 	}
-	writeJSON(w, http.StatusOK, account)
+	c.JSON(http.StatusOK, account)
 }
 
-func (s *Server) updateProxyAccount(w http.ResponseWriter, r *http.Request) {
-	current, err := s.store.GetProxyAccount(r.Context(), r.PathValue("id"))
-	if handleStoreError(w, err) {
+func (s *Server) updateProxyAccount(c *gin.Context) {
+	current, err := s.store.GetProxyAccount(c.Request.Context(), c.Param("id"))
+	if handleStoreError(c, err) {
 		return
 	}
 	var req proxyAccountPatch
-	if !decodeJSON(w, r, &req) {
+	if !bindJSON(c, &req) {
 		return
 	}
 	if req.CustomerID != nil {
@@ -399,20 +396,20 @@ func (s *Server) updateProxyAccount(w http.ResponseWriter, r *http.Request) {
 	if req.NodeIDs != nil {
 		current.NodeIDs = *req.NodeIDs
 	}
-	updated, err := s.store.UpdateProxyAccount(r.Context(), current)
-	if handleStoreError(w, err) {
+	updated, err := s.store.UpdateProxyAccount(c.Request.Context(), current)
+	if handleStoreError(c, err) {
 		return
 	}
-	s.audit(r, "proxy_account.updated", updated.ID)
-	writeJSON(w, http.StatusOK, updated)
+	s.audit(c, "proxy_account.updated", updated.ID)
+	c.JSON(http.StatusOK, updated)
 }
 
-func (s *Server) deleteProxyAccount(w http.ResponseWriter, r *http.Request) {
-	if handleStoreError(w, s.store.DeleteProxyAccount(r.Context(), r.PathValue("id"))) {
+func (s *Server) deleteProxyAccount(c *gin.Context) {
+	if handleStoreError(c, s.store.DeleteProxyAccount(c.Request.Context(), c.Param("id"))) {
 		return
 	}
-	s.audit(r, "proxy_account.deleted", r.PathValue("id"))
-	w.WriteHeader(http.StatusNoContent)
+	s.audit(c, "proxy_account.deleted", c.Param("id"))
+	c.Status(http.StatusNoContent)
 }
 
 type subscriptionTokenRequest struct {
@@ -427,59 +424,59 @@ type subscriptionTokenPatch struct {
 	ExpiresAt *time.Time `json:"expires_at"`
 }
 
-func (s *Server) createSubscriptionToken(w http.ResponseWriter, r *http.Request) {
+func (s *Server) createSubscriptionToken(c *gin.Context) {
 	var req subscriptionTokenRequest
-	if !decodeJSON(w, r, &req) {
+	if !bindJSON(c, &req) {
 		return
 	}
 	if req.CustomerID == "" {
-		writeError(w, http.StatusBadRequest, "customer_id is required")
+		writeError(c, http.StatusBadRequest, "customer_id is required")
 		return
 	}
 	rawToken, err := security.NewRandomToken()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not create subscription token")
+		writeError(c, http.StatusInternalServerError, "could not create subscription token")
 		return
 	}
-	token, err := s.store.CreateSubscriptionToken(r.Context(), domain.SubscriptionToken{
+	token, err := s.store.CreateSubscriptionToken(c.Request.Context(), domain.SubscriptionToken{
 		CustomerID: req.CustomerID,
 		Name:       req.Name,
 		TokenHash:  security.TokenDigest(rawToken),
 		Enabled:    true,
 		ExpiresAt:  req.ExpiresAt,
 	})
-	if handleStoreError(w, err) {
+	if handleStoreError(c, err) {
 		return
 	}
 	token.PlainToken = rawToken
-	w.Header().Set("X-Subscription-Token", rawToken)
-	s.audit(r, "subscription_token.created", token.ID)
-	writeJSON(w, http.StatusCreated, token)
+	c.Header("X-Subscription-Token", rawToken)
+	s.audit(c, "subscription_token.created", token.ID)
+	c.JSON(http.StatusCreated, token)
 }
 
-func (s *Server) listSubscriptionTokens(w http.ResponseWriter, r *http.Request) {
-	tokens, err := s.store.ListSubscriptionTokens(r.Context(), r.URL.Query().Get("customer_id"))
-	if handleStoreError(w, err) {
+func (s *Server) listSubscriptionTokens(c *gin.Context) {
+	tokens, err := s.store.ListSubscriptionTokens(c.Request.Context(), c.Query("customer_id"))
+	if handleStoreError(c, err) {
 		return
 	}
-	writeJSON(w, http.StatusOK, tokens)
+	c.JSON(http.StatusOK, tokens)
 }
 
-func (s *Server) getSubscriptionToken(w http.ResponseWriter, r *http.Request) {
-	token, err := s.store.GetSubscriptionToken(r.Context(), r.PathValue("id"))
-	if handleStoreError(w, err) {
+func (s *Server) getSubscriptionToken(c *gin.Context) {
+	token, err := s.store.GetSubscriptionToken(c.Request.Context(), c.Param("id"))
+	if handleStoreError(c, err) {
 		return
 	}
-	writeJSON(w, http.StatusOK, token)
+	c.JSON(http.StatusOK, token)
 }
 
-func (s *Server) updateSubscriptionToken(w http.ResponseWriter, r *http.Request) {
-	current, err := s.store.GetSubscriptionToken(r.Context(), r.PathValue("id"))
-	if handleStoreError(w, err) {
+func (s *Server) updateSubscriptionToken(c *gin.Context) {
+	current, err := s.store.GetSubscriptionToken(c.Request.Context(), c.Param("id"))
+	if handleStoreError(c, err) {
 		return
 	}
 	var req subscriptionTokenPatch
-	if !decodeJSON(w, r, &req) {
+	if !bindJSON(c, &req) {
 		return
 	}
 	if req.Name != nil {
@@ -491,28 +488,28 @@ func (s *Server) updateSubscriptionToken(w http.ResponseWriter, r *http.Request)
 	if req.ExpiresAt != nil {
 		current.ExpiresAt = req.ExpiresAt
 	}
-	updated, err := s.store.UpdateSubscriptionToken(r.Context(), current)
-	if handleStoreError(w, err) {
+	updated, err := s.store.UpdateSubscriptionToken(c.Request.Context(), current)
+	if handleStoreError(c, err) {
 		return
 	}
-	s.audit(r, "subscription_token.updated", updated.ID)
-	writeJSON(w, http.StatusOK, updated)
+	s.audit(c, "subscription_token.updated", updated.ID)
+	c.JSON(http.StatusOK, updated)
 }
 
-func (s *Server) rotateSubscriptionToken(w http.ResponseWriter, r *http.Request) {
+func (s *Server) rotateSubscriptionToken(c *gin.Context) {
 	rawToken, err := security.NewRandomToken()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not rotate subscription token")
+		writeError(c, http.StatusInternalServerError, "could not rotate subscription token")
 		return
 	}
-	token, err := s.store.RotateSubscriptionToken(r.Context(), r.PathValue("id"), security.TokenDigest(rawToken))
-	if handleStoreError(w, err) {
+	token, err := s.store.RotateSubscriptionToken(c.Request.Context(), c.Param("id"), security.TokenDigest(rawToken))
+	if handleStoreError(c, err) {
 		return
 	}
 	token.PlainToken = rawToken
-	w.Header().Set("X-Subscription-Token", rawToken)
-	s.audit(r, "subscription_token.rotated", token.ID)
-	writeJSON(w, http.StatusOK, token)
+	c.Header("X-Subscription-Token", rawToken)
+	s.audit(c, "subscription_token.rotated", token.ID)
+	c.JSON(http.StatusOK, token)
 }
 
 type trafficUsageRequest struct {
@@ -523,94 +520,95 @@ type trafficUsageRequest struct {
 	RecordedAt     time.Time `json:"recorded_at"`
 }
 
-func (s *Server) recordTrafficUsage(w http.ResponseWriter, r *http.Request) {
+func (s *Server) recordTrafficUsage(c *gin.Context) {
 	var req trafficUsageRequest
-	if !decodeJSON(w, r, &req) {
+	if !bindJSON(c, &req) {
 		return
 	}
 	if req.ProxyAccountID == "" || req.ProxyNodeID == "" {
-		writeError(w, http.StatusBadRequest, "proxy_account_id and proxy_node_id are required")
+		writeError(c, http.StatusBadRequest, "proxy_account_id and proxy_node_id are required")
 		return
 	}
 	if req.UploadBytes < 0 || req.DownloadBytes < 0 {
-		writeError(w, http.StatusBadRequest, "traffic bytes cannot be negative")
+		writeError(c, http.StatusBadRequest, "traffic bytes cannot be negative")
 		return
 	}
-	usage, err := s.store.RecordTrafficUsage(r.Context(), domain.TrafficUsage{
+	usage, err := s.store.RecordTrafficUsage(c.Request.Context(), domain.TrafficUsage{
 		ProxyAccountID: req.ProxyAccountID,
 		ProxyNodeID:    req.ProxyNodeID,
 		UploadBytes:    req.UploadBytes,
 		DownloadBytes:  req.DownloadBytes,
 		RecordedAt:     req.RecordedAt,
 	})
-	if handleStoreError(w, err) {
+	if handleStoreError(c, err) {
 		return
 	}
-	s.audit(r, "traffic_usage.recorded", usage.ID)
-	writeJSON(w, http.StatusCreated, usage)
+	s.audit(c, "traffic_usage.recorded", usage.ID)
+	c.JSON(http.StatusCreated, usage)
 }
 
-func (s *Server) getSubscription(w http.ResponseWriter, r *http.Request) {
-	fmtParam := r.URL.Query().Get("fmt")
-	if fmtParam == "" {
-		fmtParam = "v2ray"
-	}
+func (s *Server) getSubscription(c *gin.Context) {
+	fmtParam := c.DefaultQuery("fmt", "v2ray")
 	if fmtParam != "v2ray" && fmtParam != "raw" {
-		writeError(w, http.StatusBadRequest, "fmt must be v2ray or raw")
+		writeError(c, http.StatusBadRequest, "fmt must be v2ray or raw")
 		return
 	}
 
-	token, err := s.store.GetSubscriptionTokenByHash(r.Context(), security.TokenDigest(r.PathValue("token")))
+	token, err := s.store.GetSubscriptionTokenByHash(c.Request.Context(), security.TokenDigest(c.Param("token")))
 	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "subscription not found")
+		writeError(c, http.StatusNotFound, "subscription not found")
 		return
 	}
-	if handleStoreError(w, err) {
+	if handleStoreError(c, err) {
 		return
 	}
 	if !token.Enabled {
-		writeError(w, http.StatusNotFound, "subscription not found")
+		writeError(c, http.StatusNotFound, "subscription not found")
 		return
 	}
 	now := time.Now().UTC()
 	if token.ExpiresAt != nil && token.ExpiresAt.Before(now) {
-		writeError(w, http.StatusForbidden, "subscription expired")
+		writeError(c, http.StatusForbidden, "subscription expired")
 		return
 	}
-	customer, accounts, err := s.store.SubscriptionData(r.Context(), token.CustomerID)
-	if handleStoreError(w, err) {
+	customer, accounts, err := s.store.SubscriptionData(c.Request.Context(), token.CustomerID)
+	if handleStoreError(c, err) {
 		return
 	}
 	body := subscription.Build(customer, accounts, fmtParam, now)
-	_ = s.store.MarkSubscriptionUsed(r.Context(), token.ID, clientIP(r), r.UserAgent())
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(body))
+	_ = s.store.MarkSubscriptionUsed(c.Request.Context(), token.ID, clientIP(c), c.Request.UserAgent())
+	c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte(body))
 }
 
-func (s *Server) requireAdmin(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		header := r.Header.Get("Authorization")
+func (s *Server) requireAdmin() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		header := c.GetHeader("Authorization")
 		if !strings.HasPrefix(header, "Bearer ") {
-			writeError(w, http.StatusUnauthorized, "missing bearer token")
+			writeError(c, http.StatusUnauthorized, "missing bearer token")
+			c.Abort()
 			return
 		}
 		subject, ok := security.VerifyAccessToken(strings.TrimSpace(strings.TrimPrefix(header, "Bearer ")), s.cfg.SecretKey)
 		if !ok {
-			writeError(w, http.StatusUnauthorized, "invalid bearer token")
+			writeError(c, http.StatusUnauthorized, "invalid bearer token")
+			c.Abort()
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), actorKey, subject)))
-	})
+		c.Set("actor", subject)
+		c.Next()
+	}
 }
 
-func (s *Server) audit(r *http.Request, action string, metadata any) {
-	_ = s.store.WriteAudit(r.Context(), actorFromContext(r.Context()), action, metadata)
+func (s *Server) audit(c *gin.Context, action string, metadata any) {
+	_ = s.store.WriteAudit(c.Request.Context(), actorFromContext(c), action, metadata)
 }
 
-func actorFromContext(ctx context.Context) string {
-	actor, _ := ctx.Value(actorKey).(string)
-	return actor
+func actorFromContext(c *gin.Context) string {
+	actor, _ := c.Get("actor")
+	if value, ok := actor.(string); ok {
+		return value
+	}
+	return ""
 }
 
 func applyNodePatch(node *domain.ProxyNode, req nodePatch) {
@@ -664,51 +662,42 @@ func applyNodePatch(node *domain.ProxyNode, req nodePatch) {
 	}
 }
 
-func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
-	defer r.Body.Close()
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json body")
+func bindJSON(c *gin.Context, target any) bool {
+	if err := c.ShouldBindJSON(target); err != nil {
+		writeError(c, http.StatusBadRequest, "invalid json body")
 		return false
 	}
 	return true
 }
 
-func writeJSON(w http.ResponseWriter, status int, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(payload)
+func writeError(c *gin.Context, status int, message string) {
+	c.JSON(status, gin.H{"error": message})
 }
 
-func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]string{"error": message})
-}
-
-func handleStoreError(w http.ResponseWriter, err error) bool {
+func handleStoreError(c *gin.Context, err error) bool {
 	if err == nil {
 		return false
 	}
 	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "not found")
+		writeError(c, http.StatusNotFound, "not found")
 		return true
 	}
 	if errors.Is(err, store.ErrConflict) {
-		writeError(w, http.StatusConflict, "already exists")
+		writeError(c, http.StatusConflict, "already exists")
 		return true
 	}
-	writeError(w, http.StatusInternalServerError, "internal server error")
+	writeError(c, http.StatusInternalServerError, "internal server error")
 	return true
 }
 
-func clientIP(r *http.Request) string {
-	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+func clientIP(c *gin.Context) string {
+	if forwarded := c.GetHeader("X-Forwarded-For"); forwarded != "" {
 		parts := strings.Split(forwarded, ",")
 		return strings.TrimSpace(parts[0])
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	host, _, err := net.SplitHostPort(c.Request.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		return c.Request.RemoteAddr
 	}
 	return host
 }

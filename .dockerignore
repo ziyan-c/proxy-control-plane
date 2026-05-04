@@ -1,6 +1,7 @@
 .git/
 .venv/
 .env
+.local/*.env
 local.db
 *.db
 dist/

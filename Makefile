@@ -1,4 +1,13 @@
-.PHONY: test run migrate build tidy fmt docker-build
+.PHONY: init-local test run migrate build tidy fmt docker-build docker-up
+
+LOCAL_API_ENV := .local/api.local.env
+DOCKER_API_ENV := .local/api.docker.env
+POSTGRES_ENV := .local/postgres.env
+
+init-local:
+	test -f $(LOCAL_API_ENV) || cp .local/api.local.env.example $(LOCAL_API_ENV)
+	test -f $(DOCKER_API_ENV) || cp .local/api.docker.env.example $(DOCKER_API_ENV)
+	test -f $(POSTGRES_ENV) || cp .local/postgres.env.example $(POSTGRES_ENV)
 
 build:
 	go build ./cmd/server
@@ -6,11 +15,11 @@ build:
 test:
 	go test ./...
 
-run:
-	go run ./cmd/server serve
+run: init-local
+	set -a; . $(LOCAL_API_ENV); set +a; go run ./cmd/server serve
 
-migrate:
-	go run ./cmd/server migrate
+migrate: init-local
+	set -a; . $(LOCAL_API_ENV); set +a; go run ./cmd/server migrate
 
 tidy:
 	go mod tidy
@@ -20,3 +29,6 @@ fmt:
 
 docker-build:
 	docker build -t proxy-control-plane:local .
+
+docker-up: init-local
+	docker compose up --build

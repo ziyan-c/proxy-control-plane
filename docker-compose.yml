@@ -1,16 +1,14 @@
 services:
   postgres:
     image: postgres:17-alpine
-    environment:
-      POSTGRES_USER: proxy_control_app
-      POSTGRES_PASSWORD: change-me
-      POSTGRES_DB: proxy_control
+    env_file:
+      - .local/postgres.env
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U proxy_control_app -d proxy_control"]
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -20,12 +18,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    environment:
-      PCP_DATABASE_URL: postgres://proxy_control_app:change-me@postgres:5432/proxy_control?sslmode=disable
-      PCP_ADMIN_EMAIL: admin@example.com
-      PCP_ADMIN_PASSWORD: change-me-admin-password
-      PCP_SECRET_KEY: change-me-with-openssl-rand-base64-32
-      PCP_LISTEN_ADDR: :8000
+    env_file:
+      - .local/api.docker.env
     ports:
       - "127.0.0.1:8000:8000"
 

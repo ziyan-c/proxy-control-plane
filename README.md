@@ -1,103 +1,116 @@
 # proxy-control-plane
 
-`proxy-control-plane` 是一个用 Go 实现的代理业务控制面服务。它不是代理服务器
-本身，而是管理客户、代理节点、代理账号、订阅 token、订阅输出和业务数据的
-后端 API。
+[简体中文](README.zh-CN.md)
 
-这个项目的核心目标是把“业务控制面”和“真实代理节点部署”分开：本项目保存和
-管理动态业务状态，真实 VPS、Xray、sing-box、证书、防火墙等基础设施由其他
-运维工具负责。
+`proxy-control-plane` is a Go-based business control plane for a proxy service.
+It is not a proxy server itself. It provides backend APIs for managing customers,
+proxy nodes, proxy accounts, subscription tokens, subscription output, and
+business data.
 
-## 这个项目负责什么
+The main design goal is to keep the business control plane separate from real
+proxy node provisioning. This project owns dynamic business state, while VPS
+provisioning, Xray, sing-box, certificates, firewalls, and other infrastructure
+concerns are handled by separate operations tooling.
 
-本项目负责：
+## What This Project Does
 
-- 管理客户信息：邮箱、显示名称、状态、过期时间
-- 管理代理节点信息：节点名、域名、公网地址、地区、端口、传输方式、安全参数
-- 管理代理账号：VLESS UUID、账号标识、启用状态、过期时间、流量上限
-- 管理账号与节点之间的绑定关系
-- 生成和轮换订阅 token，数据库只保存 token 哈希值
-- 根据订阅 token 输出 VLESS 订阅内容
-- 支持 `raw` 和 base64 编码的 `v2ray` 订阅格式
-- 记录管理操作审计日志
-- 提供流量上报入口和流量记录表，为后续统计、限流、套餐能力打基础
-- 启动时自动执行数据库迁移
+This project is responsible for:
 
-## 这个项目不负责什么
+- Managing customer records: email, display name, status, and expiration time
+- Managing proxy nodes: name, hostname, public host, region, port, transport,
+  and security parameters
+- Managing proxy accounts: VLESS UUID, account label, enabled state, expiration
+  time, and traffic limit
+- Managing account-to-node bindings
+- Creating and rotating subscription tokens while storing only token hashes in
+  the database
+- Generating VLESS subscription output from subscription tokens
+- Supporting both `raw` and base64-encoded `v2ray` subscription formats
+- Recording admin audit logs
+- Providing a traffic reporting endpoint and traffic usage table for future
+  statistics, limits, and plan enforcement
+- Running GORM `AutoMigrate` automatically on startup
 
-本项目不负责：
+## What This Project Does Not Do
 
-- 不购买或创建 VPS
-- 不安装 Xray、sing-box、Nginx、Caddy 等服务器软件
-- 不配置系统防火墙、安全组或端口转发
-- 不申请或续签 TLS 证书
-- 不部署 WireGuard
-- 不把配置自动下发到真实代理节点
-- 不直接采集真实代理进程的流量
+This project does not:
 
-这些属于基础设施或节点运维层面的工作，可以由 `ansible-infra`、节点 agent、
-CI/CD、Ansible、Terraform 或其他运维系统负责。
+- Buy or create VPS instances
+- Install Xray, sing-box, Nginx, Caddy, or other server software
+- Configure host firewalls, security groups, or port forwarding
+- Issue or renew TLS certificates
+- Deploy WireGuard
+- Push generated configuration directly to real proxy nodes
+- Collect traffic directly from real proxy processes
 
-## 部署后会启动什么
+Those responsibilities belong to infrastructure or node operations tooling, such
+as `ansible-infra`, a node agent, CI/CD, Ansible, Terraform, or another
+deployment system.
 
-当前 `docker-compose.yml` 会启动两个服务：
+## What Starts After Deployment
 
-- `postgres`：PostgreSQL 17 数据库，保存客户、节点、账号、订阅、流量和审计数据
-- `api`：Go 后端 API 服务，提供管理接口和订阅接口
+The current `docker-compose.yml` starts two services:
 
-默认端口：
+- `postgres`: PostgreSQL 17, used for customer, node, account, subscription,
+  traffic, and audit data
+- `api`: the Go backend API service, used for admin APIs and subscription APIs
 
-- PostgreSQL：`127.0.0.1:5432`
-- API：`127.0.0.1:8000`
+Default ports:
 
-注意：Docker 部署只会启动数据库和控制面 API，不会部署任何真实代理节点软件。
+- PostgreSQL: `127.0.0.1:5432`
+- API: `127.0.0.1:8000`
 
-## 技术栈
+Important: Docker deployment starts only the database and the control-plane API.
+It does not deploy any real proxy node software.
 
-- 语言：Go
-- HTTP：标准库 `net/http`
-- 数据库：PostgreSQL
-- 数据库驱动：`github.com/jackc/pgx/v5`
-- 迁移：项目内置 Go 迁移逻辑
-- 测试：`go test`
-- 部署：Docker / Docker Compose
+## Tech Stack
 
-## 目录结构
+- Language: Go
+- HTTP: Gin
+- Database: PostgreSQL
+- ORM: GORM
+- Database driver: `gorm.io/driver/postgres`
+- Migrations: GORM `AutoMigrate`
+- Tests: `go test`
+- Deployment: Docker / Docker Compose
+
+## Project Structure
 
 ```text
-cmd/server/              服务入口，支持 migrate 和 serve 命令
-internal/config/         环境变量配置
-internal/domain/         核心业务模型
-internal/httpapi/        HTTP API、鉴权、中间件和响应处理
-internal/security/       管理员 token、订阅 token、密码校验和哈希
-internal/store/          PostgreSQL 访问和数据库迁移
-internal/subscription/   VLESS 订阅生成逻辑
+cmd/server/              Service entrypoint, supports migrate and serve commands
+internal/config/         Environment-based configuration
+internal/domain/         Core business models
+internal/httpapi/        Gin HTTP API, authentication, middleware, and responses
+internal/security/       Admin tokens, subscription tokens, passwords, and hashes
+internal/store/          GORM-based PostgreSQL access and migrations
+internal/subscription/   VLESS subscription generation
+.local/                  Local-only private configuration templates and files
 ```
 
-## 数据库
+## Database
 
-当前主要数据表：
+Main tables:
 
-- `customers`：客户
-- `proxy_nodes`：代理节点
-- `proxy_accounts`：代理账号
-- `proxy_account_nodes`：代理账号与代理节点的多对多绑定关系
-- `subscription_tokens`：订阅 token 记录，保存 token 哈希，不保存明文 token
-- `traffic_usage`：流量使用记录
-- `audit_logs`：管理操作审计日志
-- `schema_migrations`：数据库迁移记录
+- `customers`: customers
+- `proxy_nodes`: proxy nodes
+- `proxy_accounts`: proxy accounts
+- `proxy_account_nodes`: many-to-many account/node bindings
+- `subscription_tokens`: subscription token records; stores token hashes, not
+  plaintext tokens
+- `traffic_usage`: traffic usage records
+- `audit_logs`: admin audit logs
 
-## 主要接口
+## Main API
 
-健康检查：
+Health check:
 
 - `GET /health`
 
-管理员登录：
+Admin login:
 
 - `POST /admin/login`
 
-客户管理：
+Customer management:
 
 - `GET /admin/customers`
 - `POST /admin/customers`
@@ -105,7 +118,7 @@ internal/subscription/   VLESS 订阅生成逻辑
 - `PATCH /admin/customers/{id}`
 - `DELETE /admin/customers/{id}`
 
-节点管理：
+Node management:
 
 - `GET /admin/nodes`
 - `POST /admin/nodes`
@@ -113,7 +126,7 @@ internal/subscription/   VLESS 订阅生成逻辑
 - `PATCH /admin/nodes/{id}`
 - `DELETE /admin/nodes/{id}`
 
-代理账号管理：
+Proxy account management:
 
 - `GET /admin/proxy-accounts`
 - `POST /admin/proxy-accounts`
@@ -121,7 +134,7 @@ internal/subscription/   VLESS 订阅生成逻辑
 - `PATCH /admin/proxy-accounts/{id}`
 - `DELETE /admin/proxy-accounts/{id}`
 
-订阅 token 管理：
+Subscription token management:
 
 - `GET /admin/subscription-tokens`
 - `POST /admin/subscription-tokens`
@@ -129,94 +142,137 @@ internal/subscription/   VLESS 订阅生成逻辑
 - `PATCH /admin/subscription-tokens/{id}`
 - `POST /admin/subscription-tokens/{id}/rotate`
 
-流量记录：
+Traffic records:
 
 - `POST /admin/traffic-usage`
 
-客户端订阅：
+Client subscription:
 
-- `GET /sub/{token}`：返回 base64 编码后的 VLESS 订阅内容
-- `GET /sub/{token}?fmt=raw`：返回原始 VLESS 链接文本
+- `GET /sub/{token}`: returns base64-encoded VLESS subscription content
+- `GET /sub/{token}?fmt=raw`: returns raw VLESS URI text
 
-除 `/health`、`/admin/login` 和 `/sub/{token}` 外，管理接口都需要
-`Authorization: Bearer <access_token>`。
+All admin endpoints except `/health`, `/admin/login`, and `/sub/{token}` require:
 
-## 基本使用流程
-
-1. 管理员通过 `/admin/login` 登录，拿到 Bearer token。
-2. 创建客户。
-3. 创建一个或多个代理节点。
-4. 为客户创建代理账号，并绑定可访问的节点。
-5. 为客户创建订阅 token。
-6. 客户端访问 `/sub/{token}` 获取订阅内容。
-
-## 本地开发
-
-准备配置：
-
-```bash
-cp .env.example .env
+```text
+Authorization: Bearer <access_token>
 ```
 
-启动数据库：
+## Basic Flow
+
+1. Admin logs in through `/admin/login` and receives a Bearer token.
+2. Admin creates a customer.
+3. Admin creates one or more proxy nodes.
+4. Admin creates a proxy account for the customer and binds accessible nodes.
+5. Admin creates a subscription token for the customer.
+6. A client fetches subscription content from `/sub/{token}`.
+
+## Local Development
+
+Prepare configuration:
+
+```bash
+make init-local
+```
+
+This creates local private config files from templates:
+
+```text
+.local/api.local.env
+.local/api.docker.env
+.local/postgres.env
+```
+
+These `*.env` files are ignored by Git. Edit them locally before running the
+service. The host commands use `.local/api.local.env`; Docker Compose uses
+`.local/api.docker.env` and `.local/postgres.env`.
+
+Start PostgreSQL:
 
 ```bash
 docker compose up -d postgres
 ```
 
-执行迁移：
+Run migrations:
 
 ```bash
 make migrate
 ```
 
-启动 API：
+Start the API:
 
 ```bash
 make run
 ```
 
-健康检查：
+Health check:
 
 ```bash
 curl http://127.0.0.1:8000/health
 ```
 
-运行测试：
+Run tests:
 
 ```bash
 make test
 ```
 
-## Docker 启动
+## Docker
 
 ```bash
 docker compose up --build
 ```
 
-API 服务运行在：
+Or let `make` initialize local config first:
+
+```bash
+make docker-up
+```
+
+The API runs at:
 
 ```text
 http://127.0.0.1:8000
 ```
 
-## 常用配置项
+## Configuration
 
-本项目使用 `PCP_` 前缀的环境变量：
+Private local configuration lives under `.local/`.
 
-- `PCP_APP_NAME`：应用名称
-- `PCP_ENVIRONMENT`：运行环境
-- `PCP_LISTEN_ADDR`：API 监听地址，默认 `:8000`
-- `PCP_DATABASE_URL`：PostgreSQL 连接地址
-- `PCP_ADMIN_EMAIL`：管理员邮箱
-- `PCP_ADMIN_PASSWORD`：管理员密码，MVP 阶段可以使用环境变量明文引导
-- `PCP_SECRET_KEY`：访问 token 签名密钥
-- `PCP_ACCESS_TOKEN_EXPIRE_MINUTES`：管理员访问 token 有效期
-- `PCP_AUTO_MIGRATE`：启动 API 时是否自动执行迁移
+Tracked templates:
 
-## 订阅参数能力
+- `.local/api.local.env.example`: host-local API config for `make run` and
+  `make migrate`
+- `.local/api.docker.env.example`: API container config for Docker Compose
+- `.local/postgres.env.example`: PostgreSQL container config for Docker Compose
 
-节点模型已经预留常见 VLESS 参数：
+Ignored real config files:
+
+- `.local/api.local.env`
+- `.local/api.docker.env`
+- `.local/postgres.env`
+
+The API uses environment variables with the `PCP_` prefix:
+
+- `PCP_APP_NAME`: application name
+- `PCP_ENVIRONMENT`: runtime environment
+- `PCP_LISTEN_ADDR`: API listen address, defaults to `:8000`
+- `PCP_DATABASE_URL`: PostgreSQL connection URL
+- `PCP_ADMIN_EMAIL`: admin email
+- `PCP_ADMIN_PASSWORD`: admin password; plaintext env bootstrap is supported
+  for the MVP stage
+- `PCP_SECRET_KEY`: access token signing key
+- `PCP_ACCESS_TOKEN_EXPIRE_MINUTES`: admin access token lifetime
+- `PCP_AUTO_MIGRATE`: whether to run migrations automatically when the API starts
+
+PostgreSQL uses:
+
+- `POSTGRES_USER`: database user
+- `POSTGRES_PASSWORD`: database password
+- `POSTGRES_DB`: database name
+
+## Subscription Parameters
+
+The node model already includes common VLESS parameters:
 
 - `transport`
 - `security`
@@ -228,29 +284,31 @@ http://127.0.0.1:8000
 - `reality_public_key`
 - `reality_short_id`
 
-订阅生成时会把这些字段转换成 VLESS URI 查询参数。
+Subscription generation converts these fields into VLESS URI query parameters.
 
-## 当前状态
+## Current Status
 
-当前版本已经从 Python/FastAPI MVP 重构为 Go 服务，并补齐了更完整的控制面骨架：
+The project has been rebuilt from a Python/FastAPI MVP into a Go service with a
+more complete control-plane foundation:
 
-- Go API 服务
-- PostgreSQL 数据模型和内置迁移
-- 管理员登录和 Bearer token 鉴权
-- 客户、节点、代理账号、订阅 token 的基础 CRUD
-- 订阅 token 轮换
-- VLESS 订阅生成
-- 流量记录入口
-- 审计日志
-- Docker 和 CI
+- Go API service
+- PostgreSQL data model and GORM migrations
+- Admin login and Bearer token authentication
+- Basic CRUD for customers, nodes, proxy accounts, and subscription tokens
+- Subscription token rotation
+- VLESS subscription generation
+- Traffic recording endpoint
+- Audit logs
+- Docker and CI
 
-还没有实现的内容：
+Not implemented yet:
 
-- 真实节点配置下发
-- 节点 agent
-- 自动安装或更新 Xray/sing-box
-- 套餐计费
-- 流量超额自动禁用
-- Web 管理后台页面
+- Real node configuration delivery
+- Node agent
+- Automatic Xray/sing-box installation or updates
+- Billing and plans
+- Automatic disabling when traffic limits are exceeded
+- Web admin UI
 
-这些后续可以作为独立模块逐步接入，避免控制面和基础设施部署逻辑混在一起。
+These can be added later as separate modules so the control plane and
+infrastructure deployment logic stay cleanly separated.
