@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"strconv"
 	"strings"
@@ -37,6 +38,26 @@ func Load() Config {
 
 func (c Config) AccessTokenTTL() time.Duration {
 	return time.Duration(c.AccessTokenExpireMinutes) * time.Minute
+}
+
+func (c Config) ValidateServer() error {
+	var problems []string
+	if strings.EqualFold(strings.TrimSpace(c.AdminEmail), "admin@example.com") {
+		problems = append(problems, "PCP_ADMIN_EMAIL must not use the example value")
+	}
+	if isPlaceholderSecret(c.AdminPassword) || len(c.AdminPassword) < 12 {
+		problems = append(problems, "PCP_ADMIN_PASSWORD must be changed and contain at least 12 characters")
+	}
+	if isPlaceholderSecret(c.SecretKey) || len(c.SecretKey) < 32 {
+		problems = append(problems, "PCP_SECRET_KEY must be changed and contain at least 32 characters")
+	}
+	if c.AccessTokenExpireMinutes <= 0 {
+		problems = append(problems, "PCP_ACCESS_TOKEN_EXPIRE_MINUTES must be greater than 0")
+	}
+	if len(problems) > 0 {
+		return errors.New("invalid server configuration: " + strings.Join(problems, "; "))
+	}
+	return nil
 }
 
 func getEnv(key string, fallback string) string {
@@ -76,4 +97,15 @@ func getEnvBool(key string, fallback bool) bool {
 
 func normalizeDatabaseURL(value string) string {
 	return strings.Replace(value, "postgresql+psycopg://", "postgres://", 1)
+}
+
+func isPlaceholderSecret(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return true
+	}
+	if strings.HasPrefix(value, "change-me") || strings.HasPrefix(value, "change-this") {
+		return true
+	}
+	return strings.HasPrefix(value, "<") && strings.HasSuffix(value, ">")
 }

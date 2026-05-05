@@ -75,7 +75,7 @@ func valueOr(value string, fallback string) string {
 }
 
 func intString(value int) string {
-	if value == 0 {
+	if value <= 0 {
 		return "443"
 	}
 	var buf [20]byte

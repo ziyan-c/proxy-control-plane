@@ -20,6 +20,7 @@ import (
 var (
 	ErrNotFound = errors.New("not found")
 	ErrConflict = errors.New("conflict")
+	ErrInvalid  = errors.New("invalid input")
 )
 
 type Store struct {
@@ -190,6 +191,9 @@ func (s *Store) CreateProxyNode(ctx context.Context, node domain.ProxyNode) (dom
 		}
 	}
 	setNodeDefaults(&node)
+	if !validPort(node.Port) {
+		return domain.ProxyNode{}, ErrInvalid
+	}
 	if err := s.db.WithContext(ctx).Omit("ProxyAccounts").Create(&node).Error; err != nil {
 		return domain.ProxyNode{}, mapGormError(err)
 	}
@@ -216,6 +220,9 @@ func (s *Store) UpdateProxyNode(ctx context.Context, node domain.ProxyNode) (dom
 		return domain.ProxyNode{}, err
 	}
 	setNodeDefaults(&node)
+	if !validPort(node.Port) {
+		return domain.ProxyNode{}, ErrInvalid
+	}
 	if err := s.db.WithContext(ctx).Omit("ProxyAccounts").Save(&node).Error; err != nil {
 		return domain.ProxyNode{}, mapGormError(err)
 	}
@@ -491,6 +498,10 @@ func setNodeDefaults(node *domain.ProxyNode) {
 	}
 }
 
+func validPort(port int) bool {
+	return port >= 1 && port <= 65535
+}
+
 func (s *Store) loadNodesByIDs(ctx context.Context, nodeIDs []string) ([]domain.ProxyNode, error) {
 	nodeIDs = uniqueStrings(nodeIDs)
 	if len(nodeIDs) == 0 {
@@ -533,6 +544,9 @@ func mapGormError(err error) error {
 	}
 	if errors.Is(err, gorm.ErrDuplicatedKey) {
 		return ErrConflict
+	}
+	if errors.Is(err, gorm.ErrForeignKeyViolated) {
+		return ErrInvalid
 	}
 	return err
 }

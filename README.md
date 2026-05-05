@@ -129,9 +129,9 @@ Important variables:
 ```env
 PCP_LISTEN_ADDR=:9710
 PCP_DATABASE_URL=postgres://user:password@host:5432/proxy_control?sslmode=require
-PCP_ADMIN_EMAIL=admin@example.com
-PCP_ADMIN_PASSWORD=change-this
-PCP_SECRET_KEY=change-this-with-a-long-random-secret
+PCP_ADMIN_EMAIL=admin@proxy.example
+PCP_ADMIN_PASSWORD=change-this-to-a-long-admin-password
+PCP_SECRET_KEY=change-this-with-openssl-rand-base64-32-before-serving
 PCP_AUTO_CREATE_DATABASE=true
 PCP_AUTO_MIGRATE=false
 ```
@@ -142,6 +142,9 @@ Keep `PCP_AUTO_MIGRATE=false` for normal use so the server does not change table
 structure during startup. Use `./proxy-control-plane db migrate` for schema
 changes. `PCP_AUTO_MIGRATE=true` is only a development shortcut when you
 intentionally want the server to run GORM `AutoMigrate` before serving.
+The server refuses to start with the example admin email, placeholder admin
+password, placeholder secret key, a password shorter than 12 characters, or a
+secret key shorter than 32 characters.
 
 Runtime precedence is:
 

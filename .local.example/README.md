@@ -26,8 +26,10 @@ Then edit:
 .local/app.env
 ```
 
-Use strong values for `PCP_ADMIN_PASSWORD` and `PCP_SECRET_KEY` outside
-disposable local development.
+Use strong values for `PCP_ADMIN_EMAIL`, `PCP_ADMIN_PASSWORD`, and
+`PCP_SECRET_KEY` before serving. The server refuses to start with the example
+admin email, placeholder password, placeholder secret key, passwords shorter
+than 12 characters, or secret keys shorter than 32 characters.
 
 `PCP_AUTO_MIGRATE=false` keeps server startup from changing table structure.
 Run the versioned SQL migrations explicitly with:

@@ -118,9 +118,9 @@ migrations/               版本化 SQL 数据库迁移
 ```env
 PCP_LISTEN_ADDR=:9710
 PCP_DATABASE_URL=postgres://user:password@host:5432/proxy_control?sslmode=require
-PCP_ADMIN_EMAIL=admin@example.com
-PCP_ADMIN_PASSWORD=change-this
-PCP_SECRET_KEY=change-this-with-a-long-random-secret
+PCP_ADMIN_EMAIL=admin@proxy.example
+PCP_ADMIN_PASSWORD=change-this-to-a-long-admin-password
+PCP_SECRET_KEY=change-this-with-openssl-rand-base64-32-before-serving
 PCP_AUTO_CREATE_DATABASE=true
 PCP_AUTO_MIGRATE=false
 ```
@@ -130,6 +130,8 @@ PCP_AUTO_MIGRATE=false
 正常使用建议保持 `PCP_AUTO_MIGRATE=false`，这样服务启动时不会自动改表结构。
 数据库结构变化统一用 `./proxy-control-plane db migrate`。只有你明确想在开发时
 让服务启动前自动跑 GORM `AutoMigrate`，才临时改成 `true`。
+服务会拒绝使用示例管理员邮箱、占位管理员密码、占位 secret key、少于 12 个字符
+的管理员密码，或少于 32 个字符的 secret key 启动。
 
 运行时优先级是：
 

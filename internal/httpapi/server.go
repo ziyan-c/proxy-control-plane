@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -103,13 +104,6 @@ type customerRequest struct {
 	ExpiresAt   *time.Time `json:"expires_at"`
 }
 
-type customerPatch struct {
-	Email       *string    `json:"email"`
-	DisplayName *string    `json:"display_name"`
-	Status      *string    `json:"status"`
-	ExpiresAt   *time.Time `json:"expires_at"`
-}
-
 func (s *Server) createCustomer(c *gin.Context) {
 	var req customerRequest
 	if !bindJSON(c, &req) {
@@ -156,21 +150,21 @@ func (s *Server) updateCustomer(c *gin.Context) {
 	if handleStoreError(c, err) {
 		return
 	}
-	var req customerPatch
-	if !bindJSON(c, &req) {
+	fields, ok := bindJSONFields(c)
+	if !ok {
 		return
 	}
-	if req.Email != nil {
-		current.Email = *req.Email
+	if !patchString(c, fields, "email", &current.Email, false, true) {
+		return
 	}
-	if req.DisplayName != nil {
-		current.DisplayName = *req.DisplayName
+	if !patchString(c, fields, "display_name", &current.DisplayName, true, false) {
+		return
 	}
-	if req.Status != nil {
-		current.Status = *req.Status
+	if !patchString(c, fields, "status", &current.Status, false, true) {
+		return
 	}
-	if req.ExpiresAt != nil {
-		current.ExpiresAt = req.ExpiresAt
+	if !patchOptionalTime(c, fields, "expires_at", &current.ExpiresAt) {
+		return
 	}
 	updated, err := s.store.UpdateCustomer(c.Request.Context(), current)
 	if handleStoreError(c, err) {
@@ -207,8 +201,6 @@ type nodeRequest struct {
 	Enabled          *bool  `json:"enabled"`
 }
 
-type nodePatch = nodeRequest
-
 func (s *Server) createNode(c *gin.Context) {
 	var req nodeRequest
 	if !bindJSON(c, &req) {
@@ -216,6 +208,10 @@ func (s *Server) createNode(c *gin.Context) {
 	}
 	if req.Name == "" || req.Hostname == "" {
 		writeError(c, http.StatusBadRequest, "name and hostname are required")
+		return
+	}
+	if req.Port != 0 && !validPort(req.Port) {
+		writeError(c, http.StatusBadRequest, "port must be between 1 and 65535")
 		return
 	}
 	enabled := true
@@ -268,11 +264,13 @@ func (s *Server) updateNode(c *gin.Context) {
 	if handleStoreError(c, err) {
 		return
 	}
-	var req nodePatch
-	if !bindJSON(c, &req) {
+	fields, ok := bindJSONFields(c)
+	if !ok {
 		return
 	}
-	applyNodePatch(&current, req)
+	if !applyNodePatch(c, &current, fields) {
+		return
+	}
 	updated, err := s.store.UpdateProxyNode(c.Request.Context(), current)
 	if handleStoreError(c, err) {
 		return
@@ -299,18 +297,6 @@ type proxyAccountRequest struct {
 	ExpiresAt         *time.Time `json:"expires_at"`
 	TrafficLimitBytes *int64     `json:"traffic_limit_bytes"`
 	NodeIDs           []string   `json:"node_ids"`
-}
-
-type proxyAccountPatch struct {
-	CustomerID        *string    `json:"customer_id"`
-	Protocol          *string    `json:"protocol"`
-	UUID              *string    `json:"uuid"`
-	EmailTag          *string    `json:"email_tag"`
-	Flow              *string    `json:"flow"`
-	Enabled           *bool      `json:"enabled"`
-	ExpiresAt         *time.Time `json:"expires_at"`
-	TrafficLimitBytes *int64     `json:"traffic_limit_bytes"`
-	NodeIDs           *[]string  `json:"node_ids"`
 }
 
 func (s *Server) createProxyAccount(c *gin.Context) {
@@ -365,36 +351,36 @@ func (s *Server) updateProxyAccount(c *gin.Context) {
 	if handleStoreError(c, err) {
 		return
 	}
-	var req proxyAccountPatch
-	if !bindJSON(c, &req) {
+	fields, ok := bindJSONFields(c)
+	if !ok {
 		return
 	}
-	if req.CustomerID != nil {
-		current.CustomerID = *req.CustomerID
+	if !patchString(c, fields, "customer_id", &current.CustomerID, false, true) {
+		return
 	}
-	if req.Protocol != nil {
-		current.Protocol = *req.Protocol
+	if !patchString(c, fields, "protocol", &current.Protocol, false, true) {
+		return
 	}
-	if req.UUID != nil {
-		current.UUID = *req.UUID
+	if !patchString(c, fields, "uuid", &current.UUID, false, true) {
+		return
 	}
-	if req.EmailTag != nil {
-		current.EmailTag = *req.EmailTag
+	if !patchString(c, fields, "email_tag", &current.EmailTag, false, true) {
+		return
 	}
-	if req.Flow != nil {
-		current.Flow = *req.Flow
+	if !patchString(c, fields, "flow", &current.Flow, true, false) {
+		return
 	}
-	if req.Enabled != nil {
-		current.Enabled = *req.Enabled
+	if !patchBool(c, fields, "enabled", &current.Enabled) {
+		return
 	}
-	if req.ExpiresAt != nil {
-		current.ExpiresAt = req.ExpiresAt
+	if !patchOptionalTime(c, fields, "expires_at", &current.ExpiresAt) {
+		return
 	}
-	if req.TrafficLimitBytes != nil {
-		current.TrafficLimitBytes = req.TrafficLimitBytes
+	if !patchOptionalInt64(c, fields, "traffic_limit_bytes", &current.TrafficLimitBytes) {
+		return
 	}
-	if req.NodeIDs != nil {
-		current.NodeIDs = *req.NodeIDs
+	if !patchStringSlice(c, fields, "node_ids", &current.NodeIDs) {
+		return
 	}
 	updated, err := s.store.UpdateProxyAccount(c.Request.Context(), current)
 	if handleStoreError(c, err) {
@@ -416,12 +402,6 @@ type subscriptionTokenRequest struct {
 	CustomerID string     `json:"customer_id"`
 	Name       string     `json:"name"`
 	ExpiresAt  *time.Time `json:"expires_at"`
-}
-
-type subscriptionTokenPatch struct {
-	Name      *string    `json:"name"`
-	Enabled   *bool      `json:"enabled"`
-	ExpiresAt *time.Time `json:"expires_at"`
 }
 
 func (s *Server) createSubscriptionToken(c *gin.Context) {
@@ -475,18 +455,18 @@ func (s *Server) updateSubscriptionToken(c *gin.Context) {
 	if handleStoreError(c, err) {
 		return
 	}
-	var req subscriptionTokenPatch
-	if !bindJSON(c, &req) {
+	fields, ok := bindJSONFields(c)
+	if !ok {
 		return
 	}
-	if req.Name != nil {
-		current.Name = *req.Name
+	if !patchString(c, fields, "name", &current.Name, false, true) {
+		return
 	}
-	if req.Enabled != nil {
-		current.Enabled = *req.Enabled
+	if !patchBool(c, fields, "enabled", &current.Enabled) {
+		return
 	}
-	if req.ExpiresAt != nil {
-		current.ExpiresAt = req.ExpiresAt
+	if !patchOptionalTime(c, fields, "expires_at", &current.ExpiresAt) {
+		return
 	}
 	updated, err := s.store.UpdateSubscriptionToken(c.Request.Context(), current)
 	if handleStoreError(c, err) {
@@ -611,55 +591,53 @@ func actorFromContext(c *gin.Context) string {
 	return ""
 }
 
-func applyNodePatch(node *domain.ProxyNode, req nodePatch) {
-	if req.Name != "" {
-		node.Name = req.Name
+func applyNodePatch(c *gin.Context, node *domain.ProxyNode, fields map[string]json.RawMessage) bool {
+	if !patchString(c, fields, "name", &node.Name, false, true) {
+		return false
 	}
-	if req.Hostname != "" {
-		node.Hostname = req.Hostname
+	if !patchString(c, fields, "hostname", &node.Hostname, false, true) {
+		return false
 	}
-	if req.PublicHost != "" {
-		node.PublicHost = req.PublicHost
+	if !patchString(c, fields, "public_host", &node.PublicHost, true, false) {
+		return false
 	}
-	if req.Region != "" {
-		node.Region = req.Region
+	if !patchString(c, fields, "region", &node.Region, true, false) {
+		return false
 	}
-	if req.Protocol != "" {
-		node.Protocol = req.Protocol
+	if !patchString(c, fields, "protocol", &node.Protocol, false, true) {
+		return false
 	}
-	if req.Port != 0 {
-		node.Port = req.Port
+	if !patchInt(c, fields, "port", &node.Port, validPort, "port must be between 1 and 65535") {
+		return false
 	}
-	if req.Transport != "" {
-		node.Transport = req.Transport
+	if !patchString(c, fields, "transport", &node.Transport, false, true) {
+		return false
 	}
-	if req.Security != "" {
-		node.Security = req.Security
+	if !patchString(c, fields, "security", &node.Security, false, true) {
+		return false
 	}
-	if req.SNI != "" {
-		node.SNI = req.SNI
+	if !patchString(c, fields, "sni", &node.SNI, true, false) {
+		return false
 	}
-	if req.Fingerprint != "" {
-		node.Fingerprint = req.Fingerprint
+	if !patchString(c, fields, "fingerprint", &node.Fingerprint, true, false) {
+		return false
 	}
-	if req.ALPN != "" {
-		node.ALPN = req.ALPN
+	if !patchString(c, fields, "alpn", &node.ALPN, true, false) {
+		return false
 	}
-	if req.Path != "" {
-		node.Path = req.Path
+	if !patchString(c, fields, "path", &node.Path, true, false) {
+		return false
 	}
-	if req.HostHeader != "" {
-		node.HostHeader = req.HostHeader
+	if !patchString(c, fields, "host_header", &node.HostHeader, true, false) {
+		return false
 	}
-	if req.RealityPublicKey != "" {
-		node.RealityPublicKey = req.RealityPublicKey
+	if !patchString(c, fields, "reality_public_key", &node.RealityPublicKey, true, false) {
+		return false
 	}
-	if req.RealityShortID != "" {
-		node.RealityShortID = req.RealityShortID
+	if !patchString(c, fields, "reality_short_id", &node.RealityShortID, true, false) {
+		return false
 	}
-	if req.Enabled != nil {
-		node.Enabled = *req.Enabled
-	}
+	return patchBool(c, fields, "enabled", &node.Enabled)
 }
 
 func bindJSON(c *gin.Context, target any) bool {
@@ -668,6 +646,18 @@ func bindJSON(c *gin.Context, target any) bool {
 		return false
 	}
 	return true
+}
+
+func bindJSONFields(c *gin.Context) (map[string]json.RawMessage, bool) {
+	var fields map[string]json.RawMessage
+	if err := c.ShouldBindJSON(&fields); err != nil {
+		writeError(c, http.StatusBadRequest, "invalid json body")
+		return nil, false
+	}
+	if fields == nil {
+		fields = map[string]json.RawMessage{}
+	}
+	return fields, true
 }
 
 func writeError(c *gin.Context, status int, message string) {
@@ -686,8 +676,146 @@ func handleStoreError(c *gin.Context, err error) bool {
 		writeError(c, http.StatusConflict, "already exists")
 		return true
 	}
+	if errors.Is(err, store.ErrInvalid) {
+		writeError(c, http.StatusBadRequest, "invalid request")
+		return true
+	}
 	writeError(c, http.StatusInternalServerError, "internal server error")
 	return true
+}
+
+func patchString(c *gin.Context, fields map[string]json.RawMessage, name string, target *string, nullable bool, nonEmpty bool) bool {
+	raw, exists := fields[name]
+	if !exists {
+		return true
+	}
+	if jsonNull(raw) {
+		if !nullable {
+			writeError(c, http.StatusBadRequest, name+" cannot be null")
+			return false
+		}
+		*target = ""
+		return true
+	}
+	var value string
+	if !decodePatchValue(c, name, raw, &value) {
+		return false
+	}
+	if nonEmpty && strings.TrimSpace(value) == "" {
+		writeError(c, http.StatusBadRequest, name+" is required")
+		return false
+	}
+	*target = value
+	return true
+}
+
+func patchBool(c *gin.Context, fields map[string]json.RawMessage, name string, target *bool) bool {
+	raw, exists := fields[name]
+	if !exists {
+		return true
+	}
+	if jsonNull(raw) {
+		writeError(c, http.StatusBadRequest, name+" cannot be null")
+		return false
+	}
+	var value bool
+	if !decodePatchValue(c, name, raw, &value) {
+		return false
+	}
+	*target = value
+	return true
+}
+
+func patchInt(c *gin.Context, fields map[string]json.RawMessage, name string, target *int, valid func(int) bool, message string) bool {
+	raw, exists := fields[name]
+	if !exists {
+		return true
+	}
+	if jsonNull(raw) {
+		writeError(c, http.StatusBadRequest, name+" cannot be null")
+		return false
+	}
+	var value int
+	if !decodePatchValue(c, name, raw, &value) {
+		return false
+	}
+	if !valid(value) {
+		writeError(c, http.StatusBadRequest, message)
+		return false
+	}
+	*target = value
+	return true
+}
+
+func patchOptionalTime(c *gin.Context, fields map[string]json.RawMessage, name string, target **time.Time) bool {
+	raw, exists := fields[name]
+	if !exists {
+		return true
+	}
+	if jsonNull(raw) {
+		*target = nil
+		return true
+	}
+	var value time.Time
+	if !decodePatchValue(c, name, raw, &value) {
+		return false
+	}
+	*target = &value
+	return true
+}
+
+func patchOptionalInt64(c *gin.Context, fields map[string]json.RawMessage, name string, target **int64) bool {
+	raw, exists := fields[name]
+	if !exists {
+		return true
+	}
+	if jsonNull(raw) {
+		*target = nil
+		return true
+	}
+	var value int64
+	if !decodePatchValue(c, name, raw, &value) {
+		return false
+	}
+	if value < 0 {
+		writeError(c, http.StatusBadRequest, name+" cannot be negative")
+		return false
+	}
+	*target = &value
+	return true
+}
+
+func patchStringSlice(c *gin.Context, fields map[string]json.RawMessage, name string, target *[]string) bool {
+	raw, exists := fields[name]
+	if !exists {
+		return true
+	}
+	if jsonNull(raw) {
+		*target = []string{}
+		return true
+	}
+	var value []string
+	if !decodePatchValue(c, name, raw, &value) {
+		return false
+	}
+	*target = value
+	return true
+}
+
+func decodePatchValue(c *gin.Context, name string, raw json.RawMessage, target any) bool {
+	if err := json.Unmarshal(raw, target); err != nil {
+		writeError(c, http.StatusBadRequest, name+" has invalid value")
+		return false
+	}
+	return true
+}
+
+func jsonNull(raw json.RawMessage) bool {
+	return strings.TrimSpace(string(raw)) == "null"
+}
+
+func validPort(port int) bool {
+	return port >= 1 && port <= 65535
 }
 
 func clientIP(c *gin.Context) string {

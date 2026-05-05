@@ -127,6 +127,11 @@ func runService(cmd *cobra.Command, rootOpts *Options, opts *serviceOptions, mod
 	if err := applyServiceOptions(&cfg, opts); err != nil {
 		return err
 	}
+	if mode == serviceModeServe {
+		if err := cfg.ValidateServer(); err != nil {
+			return err
+		}
+	}
 
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
