@@ -8,9 +8,9 @@ proxy nodes, proxy accounts, subscription tokens, subscription output, traffic
 records, and admin audit logs.
 
 The main design choice is separation: this project manages dynamic business
-state, while real node provisioning is handled elsewhere. VPS creation, Xray or
-sing-box installation, TLS certificates, firewall rules, and node-side config
-delivery should be owned by separate infrastructure tooling.
+state, while real node provisioning is handled elsewhere. VPS creation, Xray,
+V2Ray, or sing-box installation, TLS certificates, firewall rules, and
+node-side config delivery should be owned by separate infrastructure tooling.
 
 ## What It Does
 
@@ -20,6 +20,7 @@ delivery should be owned by separate infrastructure tooling.
 - Provides admin login and Bearer-token protected management APIs
 - Records admin audit logs
 - Accepts traffic usage reports for future quota and plan enforcement
+- Optionally reconciles managed Xray runtime users through the Xray gRPC API
 - Connects to PostgreSQL through GORM
 - Can create the target PostgreSQL database when the configured role is allowed
 - Applies versioned SQL migrations and can optionally run GORM `AutoMigrate`
@@ -32,7 +33,7 @@ delivery should be owned by separate infrastructure tooling.
 This repository does not deploy real proxy nodes. It does not:
 
 - Buy or create VPS instances
-- Install Xray, sing-box, Nginx, Caddy, or other server software
+- Install Xray, V2Ray, sing-box, Nginx, Caddy, or other server software
 - Configure system firewalls, cloud security groups, or port forwarding
 - Issue or renew TLS certificates
 - Deploy WireGuard
@@ -72,8 +73,143 @@ Default API port:
 
 - `127.0.0.1:9710`
 
-Docker does not start or configure Xray, sing-box, certificates, firewalls, or
-real proxy-node software.
+Docker does not start or configure Xray, sing-box, certificates,
+firewalls, or real proxy-node software.
+
+## Xray Nodes
+
+This control plane now mirrors the two node groups used by the companion
+`ansible-infra` project:
+
+- `runtime=xray`: Xray VLESS Reality nodes, usually public `443/tcp`
+- `runtime=xray`: Xray VLESS WebSocket nodes under Caddy, usually public
+  `443/tcp` with WebSocket path `/v2ray`
+- `runtime=custom`: a generic node when the runtime is managed outside those
+  two Ansible roles
+
+Supported runtime values are `xray` and `custom`. Legacy `runtime=v2ray`
+records are migrated to `xray` because the WebSocket-under-Caddy backend is now
+Xray too.
+
+The node record stores client-facing subscription values, not the private
+server-only values. For Xray under Caddy, that means the subscription usually
+uses `security=tls`, `transport=ws`, `path=/v2ray`, and the public domain even
+though the Xray container itself listens on internal port `10010`. For Xray
+Reality, use the Reality public key in `reality_public_key`; do not put the
+server private key from Ansible into this database.
+
+Example Xray-under-Caddy node:
+
+```json
+{
+  "name": "xray-under-caddy-la-1",
+  "runtime": "xray",
+  "hostname": "gfw-la-us.example.com",
+  "public_host": "gfw-la-us.example.com",
+  "port": 443,
+  "transport": "ws",
+  "security": "tls",
+  "path": "/v2ray",
+  "host_header": "gfw-la-us.example.com"
+}
+```
+
+Example Xray Reality node:
+
+```json
+{
+  "name": "xray-fr-1",
+  "runtime": "xray",
+  "hostname": "node.example.com",
+  "public_host": "node.example.com",
+  "port": 443,
+  "transport": "tcp",
+  "security": "reality",
+  "sni": "www.example.com",
+  "fingerprint": "chrome",
+  "reality_public_key": "<xray-reality-public-key>",
+  "reality_short_id": "<short-id>"
+}
+```
+
+Ansible should register deployed nodes through the control-plane API instead of
+writing PostgreSQL directly. The sync endpoint is non-destructive: nodes in the
+request are created or updated by `name`, while nodes omitted from the request
+are left unchanged.
+
+```bash
+curl -X POST http://127.0.0.1:9710/admin/nodes/sync \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "nodes": [
+      {
+        "name": "xray-fr-1",
+        "runtime": "xray",
+        "hostname": "node.example.com",
+        "public_host": "node.example.com",
+        "port": 443,
+        "transport": "tcp",
+        "security": "reality",
+        "sni": "www.example.com",
+        "fingerprint": "chrome",
+        "reality_public_key": "<xray-reality-public-key>",
+        "reality_short_id": "<short-id>"
+      }
+    ]
+  }'
+```
+
+If `enabled` is omitted, existing nodes keep their current enabled state and new
+nodes default to enabled.
+
+Existing static clients can be imported from copied Xray `config.json` files
+before runtime sync takes over. The node must already exist in PostgreSQL,
+usually through Ansible node sync:
+
+```bash
+mkdir -p .local/imports
+scp root@node.example.com:/opt/xray-under-caddy/config.json .local/imports/xray-under-caddy-la-1.json
+
+./proxy-control-plane import xray-config \
+  --node xray-under-caddy-la-1 \
+  --file .local/imports/xray-under-caddy-la-1.json
+```
+
+The import is idempotent. It creates or reuses the legacy customer
+`legacy-public@proxy-control-plane.local`, creates missing VLESS proxy accounts
+for static clients, and binds them to the named node. It does not use Xray's
+`email` field as a customer email. If the same UUID appears with different
+`flow` values across configs, the command fails because the current data model
+stores flow on the proxy account.
+
+During migration, runtime sync treats a matching unmanaged static Xray user
+with the same UUID and flow as already present, so it does not duplicate-add the
+legacy account. To make a legacy user fully removable by PostgreSQL, remove that
+static client from node config after confirming runtime sync has added the
+managed user.
+
+When Ansible enables the runtime API, node sync can also send:
+
+```json
+{
+  "runtime_api_enabled": true,
+  "runtime_api_host": "10.66.0.1",
+  "runtime_api_port": 10085,
+  "runtime_inbound_tag": "proxy-control-plane-vless-in"
+}
+```
+
+These fields record how the control plane reaches the Xray gRPC API. When
+`PCP_RUNTIME_SYNC_ENABLED=true`, the server periodically reads runtime users
+from Xray, compares their hash with the target users in PostgreSQL, and only
+calls `AddUser`/`RemoveUser` when the hashes differ. Routine sync is an inspect
+and diff flow, not a periodic full reconcile. The syncer only manages runtime
+users whose email is generated by this project, such as
+`pcp-<proxy_account_id>@proxy-control-plane`; static config users or manually
+added legacy users are left alone. In Xray this field is the runtime identity
+used by `AddUser`/`RemoveUser`, not the customer contact email; customer email
+stays in PostgreSQL on the `customers` table.
 
 ## Tech Stack
 
@@ -134,6 +270,10 @@ PCP_ADMIN_PASSWORD=change-this-to-a-long-admin-password
 PCP_SECRET_KEY=change-this-with-openssl-rand-base64-32-before-serving
 PCP_AUTO_CREATE_DATABASE=true
 PCP_AUTO_MIGRATE=false
+PCP_RUNTIME_SYNC_ENABLED=false
+PCP_RUNTIME_SYNC_INTERVAL=5m
+PCP_RUNTIME_SYNC_TIMEOUT=30s
+PCP_RUNTIME_SYNC_CONCURRENCY=3
 ```
 
 For a remote PostgreSQL server, use `sslmode=require` when the server supports
@@ -145,6 +285,14 @@ intentionally want the server to run GORM `AutoMigrate` before serving.
 The server refuses to start with the example admin email, placeholder admin
 password, placeholder secret key, a password shorter than 12 characters, or a
 secret key shorter than 32 characters.
+
+Runtime sync is disabled by default. Enable `PCP_RUNTIME_SYNC_ENABLED=true`
+after Ansible has registered Xray nodes with runtime API fields. The sync loop
+uses `GetInboundUsers`, computes a managed-user hash, skips unchanged nodes, and
+diffs only changed nodes. Static users that already live in Xray config are not
+removed by this project. Do not store real customer contact emails in Xray's
+runtime `email` field; use PostgreSQL for customer identity and let the control
+plane generate the Xray runtime key.
 
 Runtime precedence is:
 
@@ -222,6 +370,7 @@ not try to read `.local/` from inside the image.
 ./proxy-control-plane config init
 ./proxy-control-plane db migrate
 ./proxy-control-plane db automigrate
+./proxy-control-plane import xray-config --node xray-under-caddy-la-1 --file .local/imports/xray-under-caddy-la-1.json
 ./proxy-control-plane server serve
 ./proxy-control-plane docker up
 ```
@@ -233,6 +382,9 @@ Useful flags:
 ./proxy-control-plane server serve --env-file=.local/app.env
 ./proxy-control-plane server serve --database-url='postgres://user:password@host:5432/proxy_control?sslmode=require'
 ./proxy-control-plane server serve --auto-create-database=true --auto-migrate=true
+./proxy-control-plane server serve --runtime-sync=true --runtime-sync-interval=5m
+./proxy-control-plane import xray-config --node xray-under-caddy-la-1 --file .local/imports/xray-under-caddy-la-1.json
+./proxy-control-plane import xray-config --node xray-fr-1 --file .local/imports/xray-fr-1.json --dry-run
 ./proxy-control-plane db migrate --database-url='postgres://user:password@host:5432/proxy_control?sslmode=require'
 ./proxy-control-plane db migrate --migrations-dir=migrations
 ./proxy-control-plane db automigrate
@@ -268,6 +420,7 @@ Proxy nodes:
 
 - `GET /admin/nodes`
 - `POST /admin/nodes`
+- `POST /admin/nodes/sync`
 - `GET /admin/nodes/{id}`
 - `PATCH /admin/nodes/{id}`
 - `DELETE /admin/nodes/{id}`
@@ -321,9 +474,12 @@ Authorization: Bearer <access_token>
 3. Start the API with `./proxy-control-plane server serve` or
    `./proxy-control-plane docker up`.
 4. Log in through `POST /admin/login`.
-5. Create customers, nodes, proxy accounts, account-node bindings, and
+5. Register nodes through Ansible node sync or create them through the API.
+6. Optionally import existing static Xray clients with
+   `./proxy-control-plane import xray-config`.
+7. Create customers, nodes, proxy accounts, account-node bindings, and
    subscription tokens.
-6. Give clients subscription URLs like `http://host:9710/sub/{token}`.
+8. Give clients subscription URLs like `http://host:9710/sub/{token}`.
 
 ## Verification
 

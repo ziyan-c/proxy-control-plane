@@ -43,3 +43,8 @@ GORM AutoMigrate is still available for active development:
 ```bash
 ./proxy-control-plane db automigrate
 ```
+
+`PCP_RUNTIME_SYNC_ENABLED=false` keeps Xray runtime reconciliation disabled by
+default. Turn it on only after Ansible has registered nodes with
+`runtime_api_enabled=true`, `runtime_api_host`, `runtime_api_port`, and
+`runtime_inbound_tag`.

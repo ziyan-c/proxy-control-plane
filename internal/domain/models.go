@@ -16,25 +16,32 @@ type Customer struct {
 }
 
 type ProxyNode struct {
-	ID               string    `json:"id" gorm:"primaryKey;type:text"`
-	Name             string    `json:"name" gorm:"uniqueIndex;not null"`
-	Hostname         string    `json:"hostname" gorm:"not null"`
-	PublicHost       string    `json:"public_host,omitempty"`
-	Region           string    `json:"region,omitempty"`
-	Protocol         string    `json:"protocol" gorm:"not null"`
-	Port             int       `json:"port" gorm:"not null"`
-	Transport        string    `json:"transport" gorm:"not null"`
-	Security         string    `json:"security" gorm:"not null"`
-	SNI              string    `json:"sni,omitempty"`
-	Fingerprint      string    `json:"fingerprint,omitempty"`
-	ALPN             string    `json:"alpn,omitempty"`
-	Path             string    `json:"path,omitempty"`
-	HostHeader       string    `json:"host_header,omitempty"`
-	RealityPublicKey string    `json:"reality_public_key,omitempty"`
-	RealityShortID   string    `json:"reality_short_id,omitempty"`
-	Enabled          bool      `json:"enabled" gorm:"index;not null"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	ID                   string     `json:"id" gorm:"primaryKey;type:text"`
+	Name                 string     `json:"name" gorm:"uniqueIndex;not null"`
+	Hostname             string     `json:"hostname" gorm:"not null"`
+	PublicHost           string     `json:"public_host,omitempty"`
+	Region               string     `json:"region,omitempty"`
+	Runtime              string     `json:"runtime" gorm:"index;not null"`
+	Protocol             string     `json:"protocol" gorm:"not null"`
+	Port                 int        `json:"port" gorm:"not null"`
+	Transport            string     `json:"transport" gorm:"not null"`
+	Security             string     `json:"security" gorm:"not null"`
+	SNI                  string     `json:"sni,omitempty"`
+	Fingerprint          string     `json:"fingerprint,omitempty"`
+	ALPN                 string     `json:"alpn,omitempty"`
+	Path                 string     `json:"path,omitempty"`
+	HostHeader           string     `json:"host_header,omitempty"`
+	RealityPublicKey     string     `json:"reality_public_key,omitempty"`
+	RealityShortID       string     `json:"reality_short_id,omitempty"`
+	RuntimeAPIEnabled    bool       `json:"runtime_api_enabled" gorm:"index;not null;default:false"`
+	RuntimeAPIHost       string     `json:"runtime_api_host,omitempty"`
+	RuntimeAPIPort       int        `json:"runtime_api_port,omitempty" gorm:"not null;default:0"`
+	RuntimeInboundTag    string     `json:"runtime_inbound_tag,omitempty"`
+	LastRuntimeSyncAt    *time.Time `json:"last_runtime_sync_at,omitempty"`
+	LastRuntimeSyncError string     `json:"last_runtime_sync_error,omitempty"`
+	Enabled              bool       `json:"enabled" gorm:"index;not null"`
+	CreatedAt            time.Time  `json:"created_at"`
+	UpdatedAt            time.Time  `json:"updated_at"`
 
 	ProxyAccounts []ProxyAccount `json:"-" gorm:"many2many:proxy_account_nodes;constraint:OnDelete:CASCADE;"`
 }
@@ -86,6 +93,13 @@ type TrafficUsage struct {
 	ProxyNode    ProxyNode    `json:"-" gorm:"foreignKey:ProxyNodeID;constraint:OnDelete:CASCADE;"`
 }
 
+type RuntimeUser struct {
+	ProxyAccountID string `json:"proxy_account_id,omitempty"`
+	Email          string `json:"email"`
+	UUID           string `json:"uuid"`
+	Flow           string `json:"flow,omitempty"`
+}
+
 type AuditLog struct {
 	ID           string    `json:"id" gorm:"primaryKey;type:text"`
 	Actor        string    `json:"actor,omitempty"`
@@ -100,4 +114,28 @@ func (TrafficUsage) TableName() string {
 
 func (AuditLog) TableName() string {
 	return "audit_logs"
+}
+
+const runtimeUserEmailSuffix = "@proxy-control-plane"
+
+func RuntimeProxyAccountEmail(proxyAccountID string) string {
+	if proxyAccountID == "" {
+		return ""
+	}
+	return "pcp-" + proxyAccountID + runtimeUserEmailSuffix
+}
+
+func ProxyAccountIDFromRuntimeEmail(email string) (string, bool) {
+	const prefix = "pcp-"
+	if len(email) <= len(prefix)+len(runtimeUserEmailSuffix) {
+		return "", false
+	}
+	if email[:len(prefix)] != prefix {
+		return "", false
+	}
+	if email[len(email)-len(runtimeUserEmailSuffix):] != runtimeUserEmailSuffix {
+		return "", false
+	}
+	id := email[len(prefix) : len(email)-len(runtimeUserEmailSuffix)]
+	return id, id != ""
 }

@@ -15,17 +15,22 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/ziyan-c/proxy-control-plane/internal/config"
 	"github.com/ziyan-c/proxy-control-plane/internal/httpapi"
+	"github.com/ziyan-c/proxy-control-plane/internal/runtimesync"
 	"github.com/ziyan-c/proxy-control-plane/internal/store"
 )
 
 type serviceOptions struct {
-	envFile            string
-	listenAddr         string
-	databaseURL        string
-	autoCreateDatabase string
-	autoMigrate        string
-	migrationsDir      string
-	noLocalConfig      bool
+	envFile                string
+	listenAddr             string
+	databaseURL            string
+	autoCreateDatabase     string
+	autoMigrate            string
+	runtimeSync            string
+	runtimeSyncInterval    string
+	runtimeSyncTimeout     string
+	runtimeSyncConcurrency int
+	migrationsDir          string
+	noLocalConfig          bool
 }
 
 type serviceMode int
@@ -57,6 +62,10 @@ func newServerServeCommand(rootOpts *Options) *cobra.Command {
 	addServiceFlags(cmd, opts)
 	cmd.Flags().StringVar(&opts.listenAddr, "listen", "", "API listen address, for example :9710")
 	cmd.Flags().StringVar(&opts.autoMigrate, "auto-migrate", "", "true or false; run GORM AutoMigrate before serving")
+	cmd.Flags().StringVar(&opts.runtimeSync, "runtime-sync", "", "true or false; enable Xray runtime user reconciliation")
+	cmd.Flags().StringVar(&opts.runtimeSyncInterval, "runtime-sync-interval", "", "interval for runtime inspect and diff sync, for example 5m")
+	cmd.Flags().StringVar(&opts.runtimeSyncTimeout, "runtime-sync-timeout", "", "timeout per runtime API call, for example 30s")
+	cmd.Flags().IntVar(&opts.runtimeSyncConcurrency, "runtime-sync-concurrency", 0, "maximum runtime nodes to inspect in parallel")
 	return cmd
 }
 
@@ -185,6 +194,30 @@ func applyServiceOptions(cfg *config.Config, opts *serviceOptions) error {
 		}
 		cfg.AutoMigrate = value
 	}
+	if opts.runtimeSync != "" {
+		value, err := strconv.ParseBool(opts.runtimeSync)
+		if err != nil {
+			return fmt.Errorf("--runtime-sync must be true or false: %w", err)
+		}
+		cfg.RuntimeSyncEnabled = value
+	}
+	if opts.runtimeSyncInterval != "" {
+		value, err := time.ParseDuration(opts.runtimeSyncInterval)
+		if err != nil {
+			return fmt.Errorf("--runtime-sync-interval must be a duration such as 5m: %w", err)
+		}
+		cfg.RuntimeSyncInterval = value
+	}
+	if opts.runtimeSyncTimeout != "" {
+		value, err := time.ParseDuration(opts.runtimeSyncTimeout)
+		if err != nil {
+			return fmt.Errorf("--runtime-sync-timeout must be a duration such as 30s: %w", err)
+		}
+		cfg.RuntimeSyncTimeout = value
+	}
+	if opts.runtimeSyncConcurrency > 0 {
+		cfg.RuntimeSyncConcurrency = opts.runtimeSyncConcurrency
+	}
 	return nil
 }
 
@@ -206,6 +239,18 @@ func printMigrationResults(results []store.MigrationResult) {
 }
 
 func serve(ctx context.Context, cfg config.Config, st *store.Store) error {
+	serveCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	if cfg.RuntimeSyncEnabled {
+		syncer := runtimesync.New(st, runtimesync.XrayClient{Timeout: cfg.RuntimeSyncTimeout}, runtimesync.Options{
+			Interval:    cfg.RuntimeSyncInterval,
+			Timeout:     cfg.RuntimeSyncTimeout,
+			Concurrency: cfg.RuntimeSyncConcurrency,
+		})
+		go syncer.Run(serveCtx)
+	}
+
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           httpapi.New(cfg, st),

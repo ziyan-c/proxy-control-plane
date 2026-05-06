@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/ziyan-c/proxy-control-plane/internal/domain"
 )
 
 func TestPatchHelpersClearNullableFields(t *testing.T) {
@@ -51,11 +52,75 @@ func TestPatchHelpersRejectInvalidPort(t *testing.T) {
 	}
 }
 
+func TestPatchHelpersRejectInvalidRuntimeAPIPort(t *testing.T) {
+	c, recorder := patchContext(`{"runtime_api_port":70000}`)
+	fields, ok := bindJSONFields(c)
+	if !ok {
+		t.Fatal("bindJSONFields failed")
+	}
+
+	port := 10085
+	if patchInt(c, fields, "runtime_api_port", &port, validRuntimeAPIPort, "runtime_api_port must be 0 or between 1 and 65535") {
+		t.Fatal("patchInt accepted invalid runtime API port")
+	}
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+}
+
+func TestApplyNodePatchRejectsNullRuntime(t *testing.T) {
+	c, recorder := patchContext(`{"runtime":null}`)
+	fields, ok := bindJSONFields(c)
+	if !ok {
+		t.Fatal("bindJSONFields failed")
+	}
+
+	node := domain.ProxyNode{Runtime: "xray"}
+	if applyNodePatch(c, &node, fields) {
+		t.Fatal("applyNodePatch accepted null runtime")
+	}
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+}
+
+func TestSyncNodesRequiresRuntime(t *testing.T) {
+	c, recorder := requestContext(http.MethodPost, `{"nodes":[{"name":"node-1","hostname":"node.example.com"}]}`)
+
+	server := &Server{}
+	server.syncNodes(c)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(recorder.Body.String(), "nodes[].runtime is required") {
+		t.Fatalf("body = %s, want runtime error", recorder.Body.String())
+	}
+}
+
+func TestSyncNodesRejectsInvalidRuntime(t *testing.T) {
+	c, recorder := requestContext(http.MethodPost, `{"nodes":[{"name":"node-1","hostname":"node.example.com","runtime":"trojan"}]}`)
+
+	server := &Server{}
+	server.syncNodes(c)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(recorder.Body.String(), "nodes[].runtime must be custom or xray") {
+		t.Fatalf("body = %s, want runtime validation error", recorder.Body.String())
+	}
+}
+
 func patchContext(body string) (*gin.Context, *httptest.ResponseRecorder) {
+	return requestContext(http.MethodPatch, body)
+}
+
+func requestContext(method string, body string) (*gin.Context, *httptest.ResponseRecorder) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(body))
+	c.Request = httptest.NewRequest(method, "/", strings.NewReader(body))
 	c.Request.Header.Set("Content-Type", "application/json")
 	return c, recorder
 }

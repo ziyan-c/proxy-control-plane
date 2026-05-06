@@ -15,6 +15,7 @@ import (
 	"github.com/ziyan-c/proxy-control-plane/internal/security"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 var (
@@ -25,6 +26,16 @@ var (
 
 type Store struct {
 	db *gorm.DB
+}
+
+type ProxyNodeUpsert struct {
+	Node            domain.ProxyNode
+	PreserveEnabled bool
+}
+
+type ProxyNodeUpsertResult struct {
+	Node    domain.ProxyNode
+	Created bool
 }
 
 func Open(ctx context.Context, databaseURL string, autoCreateDatabase bool) (*Store, error) {
@@ -51,6 +62,7 @@ func Open(ctx context.Context, databaseURL string, autoCreateDatabase bool) (*St
 func openGorm(ctx context.Context, databaseURL string) (*gorm.DB, error) {
 	db, err := gorm.Open(postgres.Open(databaseURL), &gorm.Config{
 		TranslateError: true,
+		Logger:         logger.Default.LogMode(logger.Silent),
 	})
 	if err != nil {
 		return nil, err
@@ -191,7 +203,13 @@ func (s *Store) CreateProxyNode(ctx context.Context, node domain.ProxyNode) (dom
 		}
 	}
 	setNodeDefaults(&node)
+	if !validNodeRuntime(node.Runtime) {
+		return domain.ProxyNode{}, ErrInvalid
+	}
 	if !validPort(node.Port) {
+		return domain.ProxyNode{}, ErrInvalid
+	}
+	if !validRuntimeAPIConfig(node) {
 		return domain.ProxyNode{}, ErrInvalid
 	}
 	if err := s.db.WithContext(ctx).Omit("ProxyAccounts").Create(&node).Error; err != nil {
@@ -215,12 +233,110 @@ func (s *Store) GetProxyNode(ctx context.Context, id string) (domain.ProxyNode, 
 	return node, nil
 }
 
+func (s *Store) GetProxyNodeByName(ctx context.Context, name string) (domain.ProxyNode, error) {
+	var node domain.ProxyNode
+	err := s.db.WithContext(ctx).First(&node, "name = ?", name).Error
+	if err != nil {
+		return domain.ProxyNode{}, mapGormError(err)
+	}
+	return node, nil
+}
+
+func (s *Store) UpsertProxyNodeByName(ctx context.Context, node domain.ProxyNode, preserveEnabled bool) (domain.ProxyNode, bool, error) {
+	results, err := s.UpsertProxyNodesByName(ctx, []ProxyNodeUpsert{
+		{
+			Node:            node,
+			PreserveEnabled: preserveEnabled,
+		},
+	})
+	if err != nil {
+		return domain.ProxyNode{}, false, err
+	}
+	return results[0].Node, results[0].Created, nil
+}
+
+func (s *Store) UpsertProxyNodesByName(ctx context.Context, inputs []ProxyNodeUpsert) ([]ProxyNodeUpsertResult, error) {
+	results := make([]ProxyNodeUpsertResult, 0, len(inputs))
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for _, input := range inputs {
+			node, created, err := upsertProxyNodeByNameTx(tx, input.Node, input.PreserveEnabled)
+			if err != nil {
+				return err
+			}
+			results = append(results, ProxyNodeUpsertResult{
+				Node:    node,
+				Created: created,
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+func upsertProxyNodeByNameTx(tx *gorm.DB, node domain.ProxyNode, preserveEnabled bool) (domain.ProxyNode, bool, error) {
+	if strings.TrimSpace(node.Name) == "" {
+		return domain.ProxyNode{}, false, ErrInvalid
+	}
+	setNodeDefaults(&node)
+	if !validNodeRuntime(node.Runtime) {
+		return domain.ProxyNode{}, false, ErrInvalid
+	}
+	if !validPort(node.Port) {
+		return domain.ProxyNode{}, false, ErrInvalid
+	}
+	if !validRuntimeAPIConfig(node) {
+		return domain.ProxyNode{}, false, ErrInvalid
+	}
+
+	var existing domain.ProxyNode
+	err := tx.First(&existing, "name = ?", node.Name).Error
+	if err != nil {
+		mapped := mapGormError(err)
+		if !errors.Is(mapped, ErrNotFound) {
+			return domain.ProxyNode{}, false, mapped
+		}
+		var idErr error
+		if node.ID == "" {
+			node.ID, idErr = security.NewID()
+			if idErr != nil {
+				return domain.ProxyNode{}, false, idErr
+			}
+		}
+		if preserveEnabled {
+			node.Enabled = true
+		}
+		if err := tx.Omit("ProxyAccounts").Create(&node).Error; err != nil {
+			return domain.ProxyNode{}, false, mapGormError(err)
+		}
+		return node, true, nil
+	}
+
+	if preserveEnabled {
+		node.Enabled = existing.Enabled
+	}
+	node.ID = existing.ID
+	node.CreatedAt = existing.CreatedAt
+	if err := tx.Omit("ProxyAccounts").Save(&node).Error; err != nil {
+		return domain.ProxyNode{}, false, mapGormError(err)
+	}
+	return node, false, nil
+}
+
 func (s *Store) UpdateProxyNode(ctx context.Context, node domain.ProxyNode) (domain.ProxyNode, error) {
 	if _, err := s.GetProxyNode(ctx, node.ID); err != nil {
 		return domain.ProxyNode{}, err
 	}
 	setNodeDefaults(&node)
+	if !validNodeRuntime(node.Runtime) {
+		return domain.ProxyNode{}, ErrInvalid
+	}
 	if !validPort(node.Port) {
+		return domain.ProxyNode{}, ErrInvalid
+	}
+	if !validRuntimeAPIConfig(node) {
 		return domain.ProxyNode{}, ErrInvalid
 	}
 	if err := s.db.WithContext(ctx).Omit("ProxyAccounts").Save(&node).Error; err != nil {
@@ -484,8 +600,31 @@ func (s *Store) SubscriptionData(ctx context.Context, customerID string) (domain
 }
 
 func setNodeDefaults(node *domain.ProxyNode) {
+	node.Runtime = normalizeNodeRuntime(node.Runtime)
+	if node.Runtime == "" {
+		node.Runtime = inferNodeRuntime(*node)
+	}
 	if node.Protocol == "" {
 		node.Protocol = "vless"
+	}
+	if node.Runtime == "xray" {
+		if node.Transport == "" {
+			if node.Path != "" {
+				node.Transport = "ws"
+			} else {
+				node.Transport = "tcp"
+			}
+		}
+		if node.Security == "" {
+			if node.Transport == "ws" || node.Path != "" {
+				node.Security = "tls"
+			} else {
+				node.Security = "reality"
+			}
+		}
+		if node.Transport == "ws" && node.Path == "" {
+			node.Path = "/v2ray"
+		}
 	}
 	if node.Port == 0 {
 		node.Port = 443
@@ -496,10 +635,52 @@ func setNodeDefaults(node *domain.ProxyNode) {
 	if node.Security == "" {
 		node.Security = "none"
 	}
+	if node.RuntimeAPIEnabled && node.RuntimeInboundTag == "" {
+		node.RuntimeInboundTag = "proxy-control-plane-vless-in"
+	}
+}
+
+func inferNodeRuntime(node domain.ProxyNode) string {
+	if strings.EqualFold(node.Transport, "ws") || node.Path == "/v2ray" {
+		return "xray"
+	}
+	if strings.EqualFold(node.Security, "reality") || node.RealityPublicKey != "" || node.RealityShortID != "" {
+		return "xray"
+	}
+	return "custom"
+}
+
+func normalizeNodeRuntime(runtime string) string {
+	return strings.ToLower(strings.TrimSpace(runtime))
+}
+
+func validNodeRuntime(runtime string) bool {
+	switch runtime {
+	case "custom", "xray":
+		return true
+	default:
+		return false
+	}
 }
 
 func validPort(port int) bool {
 	return port >= 1 && port <= 65535
+}
+
+func validRuntimeAPIPort(port int) bool {
+	return port == 0 || validPort(port)
+}
+
+func validRuntimeAPIConfig(node domain.ProxyNode) bool {
+	if !validRuntimeAPIPort(node.RuntimeAPIPort) {
+		return false
+	}
+	if !node.RuntimeAPIEnabled {
+		return true
+	}
+	return strings.TrimSpace(node.RuntimeAPIHost) != "" &&
+		validPort(node.RuntimeAPIPort) &&
+		strings.TrimSpace(node.RuntimeInboundTag) != ""
 }
 
 func (s *Store) loadNodesByIDs(ctx context.Context, nodeIDs []string) ([]domain.ProxyNode, error) {

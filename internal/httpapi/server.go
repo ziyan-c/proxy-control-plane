@@ -48,6 +48,7 @@ func (s *Server) routes(router *gin.Engine) {
 
 	admin.GET("/nodes", s.listNodes)
 	admin.POST("/nodes", s.createNode)
+	admin.POST("/nodes/sync", s.syncNodes)
 	admin.GET("/nodes/:id", s.getNode)
 	admin.PATCH("/nodes/:id", s.updateNode)
 	admin.DELETE("/nodes/:id", s.deleteNode)
@@ -183,22 +184,42 @@ func (s *Server) deleteCustomer(c *gin.Context) {
 }
 
 type nodeRequest struct {
-	Name             string `json:"name"`
-	Hostname         string `json:"hostname"`
-	PublicHost       string `json:"public_host"`
-	Region           string `json:"region"`
-	Protocol         string `json:"protocol"`
-	Port             int    `json:"port"`
-	Transport        string `json:"transport"`
-	Security         string `json:"security"`
-	SNI              string `json:"sni"`
-	Fingerprint      string `json:"fingerprint"`
-	ALPN             string `json:"alpn"`
-	Path             string `json:"path"`
-	HostHeader       string `json:"host_header"`
-	RealityPublicKey string `json:"reality_public_key"`
-	RealityShortID   string `json:"reality_short_id"`
-	Enabled          *bool  `json:"enabled"`
+	Name              string `json:"name"`
+	Hostname          string `json:"hostname"`
+	PublicHost        string `json:"public_host"`
+	Region            string `json:"region"`
+	Runtime           string `json:"runtime"`
+	Protocol          string `json:"protocol"`
+	Port              int    `json:"port"`
+	Transport         string `json:"transport"`
+	Security          string `json:"security"`
+	SNI               string `json:"sni"`
+	Fingerprint       string `json:"fingerprint"`
+	ALPN              string `json:"alpn"`
+	Path              string `json:"path"`
+	HostHeader        string `json:"host_header"`
+	RealityPublicKey  string `json:"reality_public_key"`
+	RealityShortID    string `json:"reality_short_id"`
+	RuntimeAPIEnabled *bool  `json:"runtime_api_enabled"`
+	RuntimeAPIHost    string `json:"runtime_api_host"`
+	RuntimeAPIPort    int    `json:"runtime_api_port"`
+	RuntimeInboundTag string `json:"runtime_inbound_tag"`
+	Enabled           *bool  `json:"enabled"`
+}
+
+type nodesSyncRequest struct {
+	Nodes []nodeRequest `json:"nodes"`
+}
+
+type nodeSyncResult struct {
+	Name    string           `json:"name"`
+	Action  string           `json:"action"`
+	Node    domain.ProxyNode `json:"node"`
+	Created bool             `json:"created"`
+}
+
+type nodesSyncResponse struct {
+	Nodes []nodeSyncResult `json:"nodes"`
 }
 
 func (s *Server) createNode(c *gin.Context) {
@@ -214,33 +235,165 @@ func (s *Server) createNode(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "port must be between 1 and 65535")
 		return
 	}
+	if req.RuntimeAPIPort != 0 && !validPort(req.RuntimeAPIPort) {
+		writeError(c, http.StatusBadRequest, "runtime_api_port must be between 1 and 65535")
+		return
+	}
 	enabled := true
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
+	runtimeAPIEnabled := false
+	if req.RuntimeAPIEnabled != nil {
+		runtimeAPIEnabled = *req.RuntimeAPIEnabled
+	}
 	node, err := s.store.CreateProxyNode(c.Request.Context(), domain.ProxyNode{
-		Name:             req.Name,
-		Hostname:         req.Hostname,
-		PublicHost:       req.PublicHost,
-		Region:           req.Region,
-		Protocol:         req.Protocol,
-		Port:             req.Port,
-		Transport:        req.Transport,
-		Security:         req.Security,
-		SNI:              req.SNI,
-		Fingerprint:      req.Fingerprint,
-		ALPN:             req.ALPN,
-		Path:             req.Path,
-		HostHeader:       req.HostHeader,
-		RealityPublicKey: req.RealityPublicKey,
-		RealityShortID:   req.RealityShortID,
-		Enabled:          enabled,
+		Name:              req.Name,
+		Hostname:          req.Hostname,
+		PublicHost:        req.PublicHost,
+		Region:            req.Region,
+		Runtime:           req.Runtime,
+		Protocol:          req.Protocol,
+		Port:              req.Port,
+		Transport:         req.Transport,
+		Security:          req.Security,
+		SNI:               req.SNI,
+		Fingerprint:       req.Fingerprint,
+		ALPN:              req.ALPN,
+		Path:              req.Path,
+		HostHeader:        req.HostHeader,
+		RealityPublicKey:  req.RealityPublicKey,
+		RealityShortID:    req.RealityShortID,
+		RuntimeAPIEnabled: runtimeAPIEnabled,
+		RuntimeAPIHost:    req.RuntimeAPIHost,
+		RuntimeAPIPort:    req.RuntimeAPIPort,
+		RuntimeInboundTag: req.RuntimeInboundTag,
+		Enabled:           enabled,
 	})
 	if handleStoreError(c, err) {
 		return
 	}
 	s.audit(c, "proxy_node.created", node.ID)
 	c.JSON(http.StatusCreated, node)
+}
+
+func (s *Server) syncNodes(c *gin.Context) {
+	var req nodesSyncRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if len(req.Nodes) == 0 {
+		writeError(c, http.StatusBadRequest, "nodes is required")
+		return
+	}
+
+	seen := map[string]struct{}{}
+	inputs := make([]store.ProxyNodeUpsert, 0, len(req.Nodes))
+	for _, item := range req.Nodes {
+		name := strings.TrimSpace(item.Name)
+		if name == "" {
+			writeError(c, http.StatusBadRequest, "nodes[].name is required")
+			return
+		}
+		if _, exists := seen[name]; exists {
+			writeError(c, http.StatusBadRequest, "nodes[].name must be unique")
+			return
+		}
+		seen[name] = struct{}{}
+
+		if item.Hostname == "" && item.PublicHost == "" {
+			writeError(c, http.StatusBadRequest, "nodes[].hostname or public_host is required")
+			return
+		}
+		runtime := strings.ToLower(strings.TrimSpace(item.Runtime))
+		if runtime == "" {
+			writeError(c, http.StatusBadRequest, "nodes[].runtime is required")
+			return
+		}
+		if !validNodeRuntime(runtime) {
+			writeError(c, http.StatusBadRequest, "nodes[].runtime must be custom or xray")
+			return
+		}
+		if item.Hostname == "" {
+			item.Hostname = item.PublicHost
+		}
+		if item.Port != 0 && !validPort(item.Port) {
+			writeError(c, http.StatusBadRequest, "port must be between 1 and 65535")
+			return
+		}
+		if item.RuntimeAPIPort != 0 && !validPort(item.RuntimeAPIPort) {
+			writeError(c, http.StatusBadRequest, "runtime_api_port must be between 1 and 65535")
+			return
+		}
+
+		enabled := false
+		preserveEnabled := item.Enabled == nil
+		if item.Enabled != nil {
+			enabled = *item.Enabled
+		}
+		runtimeAPIEnabled := false
+		if item.RuntimeAPIEnabled != nil {
+			runtimeAPIEnabled = *item.RuntimeAPIEnabled
+		}
+
+		inputs = append(inputs, store.ProxyNodeUpsert{
+			Node: domain.ProxyNode{
+				Name:              name,
+				Hostname:          item.Hostname,
+				PublicHost:        item.PublicHost,
+				Region:            item.Region,
+				Runtime:           runtime,
+				Protocol:          item.Protocol,
+				Port:              item.Port,
+				Transport:         item.Transport,
+				Security:          item.Security,
+				SNI:               item.SNI,
+				Fingerprint:       item.Fingerprint,
+				ALPN:              item.ALPN,
+				Path:              item.Path,
+				HostHeader:        item.HostHeader,
+				RealityPublicKey:  item.RealityPublicKey,
+				RealityShortID:    item.RealityShortID,
+				RuntimeAPIEnabled: runtimeAPIEnabled,
+				RuntimeAPIHost:    item.RuntimeAPIHost,
+				RuntimeAPIPort:    item.RuntimeAPIPort,
+				RuntimeInboundTag: item.RuntimeInboundTag,
+				Enabled:           enabled,
+			},
+			PreserveEnabled: preserveEnabled,
+		})
+	}
+
+	upsertResults, err := s.store.UpsertProxyNodesByName(c.Request.Context(), inputs)
+	if handleStoreError(c, err) {
+		return
+	}
+
+	results := make([]nodeSyncResult, 0, len(upsertResults))
+	createdCount := 0
+	updatedCount := 0
+	for _, result := range upsertResults {
+		action := "updated"
+		if result.Created {
+			action = "created"
+			createdCount++
+		} else {
+			updatedCount++
+		}
+		results = append(results, nodeSyncResult{
+			Name:    result.Node.Name,
+			Action:  action,
+			Node:    result.Node,
+			Created: result.Created,
+		})
+	}
+
+	s.audit(c, "proxy_node.synced", gin.H{
+		"created": createdCount,
+		"updated": updatedCount,
+		"total":   len(results),
+	})
+	c.JSON(http.StatusOK, nodesSyncResponse{Nodes: results})
 }
 
 func (s *Server) listNodes(c *gin.Context) {
@@ -604,6 +757,9 @@ func applyNodePatch(c *gin.Context, node *domain.ProxyNode, fields map[string]js
 	if !patchString(c, fields, "region", &node.Region, true, false) {
 		return false
 	}
+	if !patchString(c, fields, "runtime", &node.Runtime, false, true) {
+		return false
+	}
 	if !patchString(c, fields, "protocol", &node.Protocol, false, true) {
 		return false
 	}
@@ -635,6 +791,18 @@ func applyNodePatch(c *gin.Context, node *domain.ProxyNode, fields map[string]js
 		return false
 	}
 	if !patchString(c, fields, "reality_short_id", &node.RealityShortID, true, false) {
+		return false
+	}
+	if !patchBool(c, fields, "runtime_api_enabled", &node.RuntimeAPIEnabled) {
+		return false
+	}
+	if !patchString(c, fields, "runtime_api_host", &node.RuntimeAPIHost, true, false) {
+		return false
+	}
+	if !patchInt(c, fields, "runtime_api_port", &node.RuntimeAPIPort, validRuntimeAPIPort, "runtime_api_port must be 0 or between 1 and 65535") {
+		return false
+	}
+	if !patchString(c, fields, "runtime_inbound_tag", &node.RuntimeInboundTag, true, false) {
 		return false
 	}
 	return patchBool(c, fields, "enabled", &node.Enabled)
@@ -816,6 +984,19 @@ func jsonNull(raw json.RawMessage) bool {
 
 func validPort(port int) bool {
 	return port >= 1 && port <= 65535
+}
+
+func validRuntimeAPIPort(port int) bool {
+	return port == 0 || validPort(port)
+}
+
+func validNodeRuntime(runtime string) bool {
+	switch runtime {
+	case "custom", "xray":
+		return true
+	default:
+		return false
+	}
 }
 
 func clientIP(c *gin.Context) string {

@@ -7,7 +7,7 @@
 订阅 token、订阅输出、流量记录和管理审计日志。
 
 这个项目的核心设计是分层：本项目只管理动态业务状态，真实节点部署放到别的
-基础设施工具里做。VPS 创建、Xray 或 sing-box 安装、TLS 证书、防火墙规则、
+基础设施工具里做。VPS 创建、Xray、V2Ray 或 sing-box 安装、TLS 证书、防火墙规则、
 节点配置下发，都不应该塞进这个控制面里。
 
 ## 项目负责什么
@@ -18,6 +18,7 @@
 - 提供管理员登录和 Bearer token 保护的管理 API
 - 记录管理操作审计日志
 - 接收流量使用上报，为后续套餐、配额、限流打基础
+- 可选地通过 Xray gRPC API 同步本项目托管的 Xray runtime 用户
 - 通过 GORM 连接 PostgreSQL
 - 在数据库账号权限允许时自动创建目标 PostgreSQL database
 - 执行版本化 SQL migration，也可以在本地开发时保留 GORM `AutoMigrate`
@@ -28,7 +29,7 @@
 这个仓库不会部署真实代理节点。它不负责：
 
 - 购买或创建 VPS
-- 安装 Xray、sing-box、Nginx、Caddy 等服务器软件
+- 安装 Xray、V2Ray、sing-box、Nginx、Caddy 等服务器软件
 - 配置系统防火墙、云安全组或端口转发
 - 申请或续签 TLS 证书
 - 部署 WireGuard
@@ -65,7 +66,132 @@ Docker 名字都加了项目前缀，避免和其他项目冲突：
 
 - `127.0.0.1:9710`
 
-Docker 不会启动或配置 Xray、sing-box、证书、防火墙、真实代理节点软件。
+Docker 不会启动或配置 Xray、V2Ray、sing-box、证书、防火墙、真实代理节点软件。
+
+## Xray 节点
+
+这个控制面现在会和旁边 `ansible-infra` 项目的两类节点分组对齐：
+
+- `runtime=xray`：Xray VLESS Reality 节点，通常是公网 `443/tcp`
+- `runtime=xray`：Xray VLESS WebSocket 节点，跑在 Caddy 后面，通常是公网
+  `443/tcp`，WebSocket 路径是 `/v2ray`
+- `runtime=custom`：不直接对应这两个 Ansible role 的自定义节点
+
+现在支持的 runtime 值就是 `xray` 和 `custom`。旧的 `runtime=v2ray` 记录会迁移成
+`xray`，因为 Caddy 后面的 WebSocket 后端现在也已经换成 Xray。
+
+这里的节点记录保存的是客户端订阅要用的公网参数，不是服务端内部私密参数。比如
+Xray under Caddy 在容器里监听的是内部 `10010`，但客户端经过 Caddy 访问时，订阅里通常应该是
+`security=tls`、`transport=ws`、`path=/v2ray` 和公网域名。Xray Reality 节点要填
+`reality_public_key`，这里要放 Reality 公钥，不要把 Ansible 里的服务端私钥写进
+控制面数据库。
+
+Xray under Caddy 节点示例：
+
+```json
+{
+  "name": "xray-under-caddy-la-1",
+  "runtime": "xray",
+  "hostname": "gfw-la-us.example.com",
+  "public_host": "gfw-la-us.example.com",
+  "port": 443,
+  "transport": "ws",
+  "security": "tls",
+  "path": "/v2ray",
+  "host_header": "gfw-la-us.example.com"
+}
+```
+
+Xray Reality 节点示例：
+
+```json
+{
+  "name": "xray-fr-1",
+  "runtime": "xray",
+  "hostname": "node.example.com",
+  "public_host": "node.example.com",
+  "port": 443,
+  "transport": "tcp",
+  "security": "reality",
+  "sni": "www.example.com",
+  "fingerprint": "chrome",
+  "reality_public_key": "<xray-reality-public-key>",
+  "reality_short_id": "<short-id>"
+}
+```
+
+Ansible 部署完节点后，应该调用控制面 API 注册节点，而不是直接写 PostgreSQL。
+这个同步接口是非破坏式的：请求里的节点会按 `name` 创建或更新，请求里没出现的
+节点不会被自动删除或禁用。
+
+```bash
+curl -X POST http://127.0.0.1:9710/admin/nodes/sync \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "nodes": [
+      {
+        "name": "xray-fr-1",
+        "runtime": "xray",
+        "hostname": "node.example.com",
+        "public_host": "node.example.com",
+        "port": 443,
+        "transport": "tcp",
+        "security": "reality",
+        "sni": "www.example.com",
+        "fingerprint": "chrome",
+        "reality_public_key": "<xray-reality-public-key>",
+        "reality_short_id": "<short-id>"
+      }
+    ]
+  }'
+```
+
+如果 `enabled` 没传，已有节点会保持原来的启用状态，新节点默认启用。
+
+在 runtime sync 接管之前，可以先把现有 Xray `config.json` 里的静态 clients 导入
+PostgreSQL。节点必须已经在 PostgreSQL 里存在，通常先通过 Ansible node sync 注册：
+
+```bash
+mkdir -p .local/imports
+scp root@node.example.com:/opt/xray-under-caddy/config.json .local/imports/xray-under-caddy-la-1.json
+
+./proxy-control-plane import xray-config \
+  --node xray-under-caddy-la-1 \
+  --file .local/imports/xray-under-caddy-la-1.json
+```
+
+这个导入命令可以重复执行。它会创建或复用
+`legacy-public@proxy-control-plane.local` 这个 legacy customer，为 config 里的静态
+VLESS client 创建缺失的 proxy account，并绑定到指定节点。它不会把 Xray 的
+`email` 字段当客户邮箱用。如果同一个 UUID 在不同 config 里出现了不同 `flow`，命令
+会失败，因为当前数据模型的 flow 是存在 proxy account 上的。
+
+迁移期间，如果 Xray 里还存在同 UUID/flow 的非托管静态用户，runtime sync 会把它
+视为已经存在，不会重复 Add legacy account。等确认 runtime sync 已经补上托管用户后，
+再从节点 config 里移除静态 client，这样这个 legacy 用户才会完全受 PostgreSQL 删除
+和禁用控制。
+
+Ansible 开启 runtime API 后，节点同步也可以带上：
+
+```json
+{
+  "runtime_api_enabled": true,
+  "runtime_api_host": "10.66.0.1",
+  "runtime_api_port": 10085,
+  "runtime_inbound_tag": "proxy-control-plane-vless-in"
+}
+```
+
+这些字段记录控制面应该如何访问 Xray gRPC API。设置
+`PCP_RUNTIME_SYNC_ENABLED=true` 后，服务会周期性读取 Xray 当前 runtime 用户，
+和 PostgreSQL 里这个节点应该拥有的用户列表算 hash 比较。hash 一样就只更新同步
+时间，hash 不一样才做 `AddUser`/`RemoveUser` diff；常规流程不会定期 full
+reconcile。同步器只管理本项目生成 email 的 runtime 用户，比如
+`pcp-<proxy_account_id>@proxy-control-plane`；原本写在 Xray config 里的静态用户、
+或者你手工加的旧用户，不会被这个项目删除。这里的 Xray `email` 是
+`AddUser`/`RemoveUser` 使用的 runtime 身份键，不是客户联系邮箱；客户邮箱仍然保存在
+PostgreSQL 的 `customers` 表里。
 
 ## 技术栈
 
@@ -123,6 +249,10 @@ PCP_ADMIN_PASSWORD=change-this-to-a-long-admin-password
 PCP_SECRET_KEY=change-this-with-openssl-rand-base64-32-before-serving
 PCP_AUTO_CREATE_DATABASE=true
 PCP_AUTO_MIGRATE=false
+PCP_RUNTIME_SYNC_ENABLED=false
+PCP_RUNTIME_SYNC_INTERVAL=5m
+PCP_RUNTIME_SYNC_TIMEOUT=30s
+PCP_RUNTIME_SYNC_CONCURRENCY=3
 ```
 
 远程 PostgreSQL 如果支持 SSL，建议用 `sslmode=require`。只有在可信内网或本机
@@ -132,6 +262,13 @@ PCP_AUTO_MIGRATE=false
 让服务启动前自动跑 GORM `AutoMigrate`，才临时改成 `true`。
 服务会拒绝使用示例管理员邮箱、占位管理员密码、占位 secret key、少于 12 个字符
 的管理员密码，或少于 32 个字符的 secret key 启动。
+
+runtime sync 默认关闭。等 Ansible 已经把 Xray 节点的
+`runtime_api_enabled`、`runtime_api_host`、`runtime_api_port` 和
+`runtime_inbound_tag` 注册进控制面后，再设置 `PCP_RUNTIME_SYNC_ENABLED=true`。
+同步逻辑会用 `GetInboundUsers` 读取节点用户，hash 一致就跳过，只有不一致才 diff。
+Xray config 里的静态用户不会被控制面清理。不要把真实客户联系邮箱写进 Xray runtime
+`email` 字段；客户身份放 PostgreSQL，Xray runtime key 由控制面生成。
 
 运行时优先级是：
 
@@ -208,6 +345,7 @@ Docker 命令默认读取 `.local/app.env`，并通过 `PCP_APP_ENV_FILE` 传给
 ./proxy-control-plane config init
 ./proxy-control-plane db migrate
 ./proxy-control-plane db automigrate
+./proxy-control-plane import xray-config --node xray-under-caddy-la-1 --file .local/imports/xray-under-caddy-la-1.json
 ./proxy-control-plane server serve
 ./proxy-control-plane docker up
 ```
@@ -219,6 +357,9 @@ Docker 命令默认读取 `.local/app.env`，并通过 `PCP_APP_ENV_FILE` 传给
 ./proxy-control-plane server serve --env-file=.local/app.env
 ./proxy-control-plane server serve --database-url='postgres://user:password@host:5432/proxy_control?sslmode=require'
 ./proxy-control-plane server serve --auto-create-database=true --auto-migrate=true
+./proxy-control-plane server serve --runtime-sync=true --runtime-sync-interval=5m
+./proxy-control-plane import xray-config --node xray-under-caddy-la-1 --file .local/imports/xray-under-caddy-la-1.json
+./proxy-control-plane import xray-config --node xray-fr-1 --file .local/imports/xray-fr-1.json --dry-run
 ./proxy-control-plane db migrate --database-url='postgres://user:password@host:5432/proxy_control?sslmode=require'
 ./proxy-control-plane db migrate --migrations-dir=migrations
 ./proxy-control-plane db automigrate
@@ -253,6 +394,7 @@ Docker 命令默认读取 `.local/app.env`，并通过 `PCP_APP_ENV_FILE` 传给
 
 - `GET /admin/nodes`
 - `POST /admin/nodes`
+- `POST /admin/nodes/sync`
 - `GET /admin/nodes/{id}`
 - `PATCH /admin/nodes/{id}`
 - `DELETE /admin/nodes/{id}`
@@ -305,8 +447,10 @@ Authorization: Bearer <access_token>
 2. 执行 `./proxy-control-plane db migrate`。
 3. 用 `./proxy-control-plane server serve` 或 `./proxy-control-plane docker up` 启动 API。
 4. 通过 `POST /admin/login` 登录。
-5. 创建客户、节点、代理账号、账号节点绑定、订阅 token。
-6. 给客户端使用类似 `http://host:9710/sub/{token}` 的订阅地址。
+5. 通过 Ansible node sync 注册节点，或通过 API 创建节点。
+6. 如需接管老 config，执行 `./proxy-control-plane import xray-config` 导入静态用户。
+7. 创建客户、节点、代理账号、账号节点绑定、订阅 token。
+8. 给客户端使用类似 `http://host:9710/sub/{token}` 的订阅地址。
 
 ## 验证
 

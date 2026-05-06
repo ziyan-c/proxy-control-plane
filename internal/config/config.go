@@ -19,6 +19,10 @@ type Config struct {
 	AccessTokenExpireMinutes int
 	AutoCreateDatabase       bool
 	AutoMigrate              bool
+	RuntimeSyncEnabled       bool
+	RuntimeSyncInterval      time.Duration
+	RuntimeSyncTimeout       time.Duration
+	RuntimeSyncConcurrency   int
 }
 
 func Load() Config {
@@ -33,6 +37,10 @@ func Load() Config {
 		AccessTokenExpireMinutes: getEnvInt("PCP_ACCESS_TOKEN_EXPIRE_MINUTES", 60),
 		AutoCreateDatabase:       getEnvBool("PCP_AUTO_CREATE_DATABASE", true),
 		AutoMigrate:              getEnvBool("PCP_AUTO_MIGRATE", false),
+		RuntimeSyncEnabled:       getEnvBool("PCP_RUNTIME_SYNC_ENABLED", false),
+		RuntimeSyncInterval:      getEnvDuration("PCP_RUNTIME_SYNC_INTERVAL", 5*time.Minute),
+		RuntimeSyncTimeout:       getEnvDuration("PCP_RUNTIME_SYNC_TIMEOUT", 30*time.Second),
+		RuntimeSyncConcurrency:   getEnvInt("PCP_RUNTIME_SYNC_CONCURRENCY", 3),
 	}
 }
 
@@ -53,6 +61,17 @@ func (c Config) ValidateServer() error {
 	}
 	if c.AccessTokenExpireMinutes <= 0 {
 		problems = append(problems, "PCP_ACCESS_TOKEN_EXPIRE_MINUTES must be greater than 0")
+	}
+	if c.RuntimeSyncEnabled {
+		if c.RuntimeSyncInterval <= 0 {
+			problems = append(problems, "PCP_RUNTIME_SYNC_INTERVAL must be greater than 0")
+		}
+		if c.RuntimeSyncTimeout <= 0 {
+			problems = append(problems, "PCP_RUNTIME_SYNC_TIMEOUT must be greater than 0")
+		}
+		if c.RuntimeSyncConcurrency <= 0 {
+			problems = append(problems, "PCP_RUNTIME_SYNC_CONCURRENCY must be greater than 0")
+		}
 	}
 	if len(problems) > 0 {
 		return errors.New("invalid server configuration: " + strings.Join(problems, "; "))
@@ -93,6 +112,18 @@ func getEnvBool(key string, fallback bool) bool {
 	default:
 		return fallback
 	}
+}
+
+func getEnvDuration(key string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func normalizeDatabaseURL(value string) string {
