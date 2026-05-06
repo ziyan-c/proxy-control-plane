@@ -38,6 +38,7 @@ func (s *Server) routes(router *gin.Engine) {
 	router.GET("/health", s.health)
 	router.POST("/admin/login", s.login)
 	router.GET("/sub/:token", s.getSubscription)
+	router.GET("/legacy-sub/*path", s.getLegacySubscription)
 
 	admin := router.Group("/admin", s.requireAdmin())
 	admin.GET("/customers", s.listCustomers)
@@ -64,6 +65,12 @@ func (s *Server) routes(router *gin.Engine) {
 	admin.GET("/subscription-tokens/:id", s.getSubscriptionToken)
 	admin.PATCH("/subscription-tokens/:id", s.updateSubscriptionToken)
 	admin.POST("/subscription-tokens/:id/rotate", s.rotateSubscriptionToken)
+
+	admin.GET("/subscription-aliases", s.listSubscriptionAliases)
+	admin.POST("/subscription-aliases", s.createSubscriptionAlias)
+	admin.GET("/subscription-aliases/:id", s.getSubscriptionAlias)
+	admin.PATCH("/subscription-aliases/:id", s.updateSubscriptionAlias)
+	admin.DELETE("/subscription-aliases/:id", s.deleteSubscriptionAlias)
 
 	admin.POST("/traffic-usage", s.recordTrafficUsage)
 }
@@ -645,6 +652,108 @@ func (s *Server) rotateSubscriptionToken(c *gin.Context) {
 	c.JSON(http.StatusOK, token)
 }
 
+type subscriptionAliasRequest struct {
+	CustomerID   string     `json:"customer_id"`
+	Name         string     `json:"name"`
+	Path         string     `json:"path"`
+	Enabled      *bool      `json:"enabled"`
+	ExpiresAt    *time.Time `json:"expires_at"`
+	SourcePath   string     `json:"source_path"`
+	SourceSHA256 string     `json:"source_sha256"`
+}
+
+func (s *Server) createSubscriptionAlias(c *gin.Context) {
+	var req subscriptionAliasRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if req.CustomerID == "" {
+		writeError(c, http.StatusBadRequest, "customer_id is required")
+		return
+	}
+	if req.Path == "" {
+		writeError(c, http.StatusBadRequest, "path is required")
+		return
+	}
+	enabled := true
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
+	alias, err := s.store.CreateSubscriptionAlias(c.Request.Context(), domain.SubscriptionAlias{
+		CustomerID:   req.CustomerID,
+		Name:         req.Name,
+		Path:         req.Path,
+		Enabled:      enabled,
+		ExpiresAt:    req.ExpiresAt,
+		SourcePath:   req.SourcePath,
+		SourceSHA256: req.SourceSHA256,
+	})
+	if handleStoreError(c, err) {
+		return
+	}
+	s.audit(c, "subscription_alias.created", alias.ID)
+	c.JSON(http.StatusCreated, alias)
+}
+
+func (s *Server) listSubscriptionAliases(c *gin.Context) {
+	aliases, err := s.store.ListSubscriptionAliases(c.Request.Context(), c.Query("customer_id"))
+	if handleStoreError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, aliases)
+}
+
+func (s *Server) getSubscriptionAlias(c *gin.Context) {
+	alias, err := s.store.GetSubscriptionAlias(c.Request.Context(), c.Param("id"))
+	if handleStoreError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, alias)
+}
+
+func (s *Server) updateSubscriptionAlias(c *gin.Context) {
+	current, err := s.store.GetSubscriptionAlias(c.Request.Context(), c.Param("id"))
+	if handleStoreError(c, err) {
+		return
+	}
+	fields, ok := bindJSONFields(c)
+	if !ok {
+		return
+	}
+	if !patchString(c, fields, "name", &current.Name, false, true) {
+		return
+	}
+	if !patchString(c, fields, "path", &current.Path, false, true) {
+		return
+	}
+	if !patchBool(c, fields, "enabled", &current.Enabled) {
+		return
+	}
+	if !patchOptionalTime(c, fields, "expires_at", &current.ExpiresAt) {
+		return
+	}
+	if !patchString(c, fields, "source_path", &current.SourcePath, true, false) {
+		return
+	}
+	if !patchString(c, fields, "source_sha256", &current.SourceSHA256, true, false) {
+		return
+	}
+	updated, err := s.store.UpdateSubscriptionAlias(c.Request.Context(), current)
+	if handleStoreError(c, err) {
+		return
+	}
+	s.audit(c, "subscription_alias.updated", updated.ID)
+	c.JSON(http.StatusOK, updated)
+}
+
+func (s *Server) deleteSubscriptionAlias(c *gin.Context) {
+	if handleStoreError(c, s.store.DeleteSubscriptionAlias(c.Request.Context(), c.Param("id"))) {
+		return
+	}
+	s.audit(c, "subscription_alias.deleted", c.Param("id"))
+	c.Status(http.StatusNoContent)
+}
+
 type trafficUsageRequest struct {
 	ProxyAccountID string    `json:"proxy_account_id"`
 	ProxyNodeID    string    `json:"proxy_node_id"`
@@ -681,9 +790,8 @@ func (s *Server) recordTrafficUsage(c *gin.Context) {
 }
 
 func (s *Server) getSubscription(c *gin.Context) {
-	fmtParam := c.DefaultQuery("fmt", "v2ray")
-	if fmtParam != "v2ray" && fmtParam != "raw" {
-		writeError(c, http.StatusBadRequest, "fmt must be v2ray or raw")
+	fmtParam, ok := subscriptionFormat(c)
+	if !ok {
 		return
 	}
 
@@ -711,6 +819,55 @@ func (s *Server) getSubscription(c *gin.Context) {
 	body := subscription.Build(customer, accounts, fmtParam, now)
 	_ = s.store.MarkSubscriptionUsed(c.Request.Context(), token.ID, clientIP(c), c.Request.UserAgent())
 	c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte(body))
+}
+
+func (s *Server) getLegacySubscription(c *gin.Context) {
+	fmtParam, ok := subscriptionFormat(c)
+	if !ok {
+		return
+	}
+
+	pathHash, err := subscription.AliasDigest(c.Param("path"))
+	if err != nil {
+		writeError(c, http.StatusNotFound, "subscription not found")
+		return
+	}
+	alias, err := s.store.GetSubscriptionAliasByPathHash(c.Request.Context(), pathHash)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(c, http.StatusNotFound, "subscription not found")
+		return
+	}
+	if handleStoreError(c, err) {
+		return
+	}
+	if !alias.Enabled {
+		writeError(c, http.StatusNotFound, "subscription not found")
+		return
+	}
+	now := time.Now().UTC()
+	if alias.ExpiresAt != nil && alias.ExpiresAt.Before(now) {
+		writeError(c, http.StatusForbidden, "subscription expired")
+		return
+	}
+	customer, accounts, err := s.store.SubscriptionData(c.Request.Context(), alias.CustomerID)
+	if handleStoreError(c, err) {
+		return
+	}
+	body := subscription.Build(customer, accounts, fmtParam, now)
+	_ = s.store.MarkSubscriptionAliasUsed(c.Request.Context(), alias.ID, clientIP(c), c.Request.UserAgent())
+	c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte(body))
+}
+
+func subscriptionFormat(c *gin.Context) (string, bool) {
+	switch c.DefaultQuery("fmt", "base64") {
+	case "base64", "v2ray":
+		return "base64", true
+	case "raw":
+		return "raw", true
+	default:
+		writeError(c, http.StatusBadRequest, "fmt must be base64 or raw")
+		return "", false
+	}
 }
 
 func (s *Server) requireAdmin() gin.HandlerFunc {

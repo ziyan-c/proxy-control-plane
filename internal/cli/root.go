@@ -37,6 +37,7 @@ func NewRootCommand() *cobra.Command {
 		newServerCommand(opts),
 		newDBCommand(opts),
 		newImportCommand(opts),
+		newMaintenanceCommand(opts),
 		newDockerCommand(opts),
 	)
 

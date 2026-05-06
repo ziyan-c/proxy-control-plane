@@ -16,10 +16,10 @@ node-side config delivery should be owned by separate infrastructure tooling.
 
 - Manages customers, proxy nodes, proxy accounts, and account-to-node bindings
 - Creates and rotates subscription tokens while storing only token hashes
-- Generates VLESS subscription output in base64 `v2ray` format or raw URI format
+- Generates VLESS subscription output in base64 or raw URI format
 - Provides admin login and Bearer-token protected management APIs
 - Records admin audit logs
-- Accepts traffic usage reports for future quota and plan enforcement
+- Collects Xray user traffic through StatsService for future quota and plan enforcement
 - Optionally reconciles managed Xray runtime users through the Xray gRPC API
 - Connects to PostgreSQL through GORM
 - Can create the target PostgreSQL database when the configured role is allowed
@@ -189,6 +189,23 @@ legacy account. To make a legacy user fully removable by PostgreSQL, remove that
 static client from node config after confirming runtime sync has added the
 managed user.
 
+Existing public subscription files can also be imported. The file remains on
+Caddy for temporary compatibility, but the control plane records the old public
+path as a subscription alias and generates the new content from PostgreSQL:
+
+```bash
+./proxy-control-plane import subscription-file \
+  --file .local/imports/legacy-public.txt \
+  --public-path /legacy-public.txt \
+  --alias-name legacy-public
+```
+
+The importer accepts raw VLESS URI lists or base64-encoded subscription files.
+It creates or reuses the same legacy customer, imports missing VLESS accounts,
+tries to bind each link to an existing `proxy_nodes` row by public host, port,
+transport, security, path, and Reality fields, and stores the source file SHA256
+for audit. Re-running it is safe.
+
 When Ansible enables the runtime API, node sync can also send:
 
 ```json
@@ -211,6 +228,16 @@ added legacy users are left alone. In Xray this field is the runtime identity
 used by `AddUser`/`RemoveUser`, not the customer contact email; customer email
 stays in PostgreSQL on the `customers` table.
 
+Traffic collection uses the same Xray gRPC endpoint, but calls `StatsService`
+instead of `HandlerService`. Xray must have `stats: {}` and policy
+`statsUserUplink/statsUserDownlink` enabled on level `0`; the Ansible Xray
+roles render those settings when `proxy_control_plane_runtime_api_enabled` is
+true. When `PCP_TRAFFIC_SYNC_ENABLED=true`, the server queries managed-user
+counters such as
+`user>>>pcp-<proxy_account_id>@proxy-control-plane>>>traffic>>>uplink`, resets
+them, and writes the returned deltas to `traffic_usage`. This project does not
+target VMess; managed runtime users and generated subscriptions are VLESS.
+
 ## Tech Stack
 
 - Go: simple static deployment, fast startup, strong standard library, and a
@@ -222,6 +249,8 @@ stays in PostgreSQL on the `customers` table.
 - GORM: model-driven CRUD and optional development `AutoMigrate`
 - SQL migrations: versioned schema changes for production-style deployments
 - Docker Compose: repeatable local or server startup for the API container
+- Xray gRPC API: runtime user reconciliation through `HandlerService` and
+  traffic aggregation through `StatsService`
 
 The current stack favors operational simplicity. It keeps the app deployable as
 a single Go binary or as one Docker container, while PostgreSQL remains an
@@ -238,6 +267,7 @@ internal/httpapi/         Gin API, auth middleware, handlers, and responses
 internal/security/        Admin tokens, subscription tokens, password checks, hashes
 internal/store/           GORM PostgreSQL access and migrations
 internal/subscription/    VLESS subscription generation
+internal/trafficsync/     Xray StatsService traffic collection
 migrations/               Versioned SQL schema migrations
 .local.example/           Tracked example configuration
 .local/                   Ignored private configuration
@@ -274,6 +304,10 @@ PCP_RUNTIME_SYNC_ENABLED=false
 PCP_RUNTIME_SYNC_INTERVAL=5m
 PCP_RUNTIME_SYNC_TIMEOUT=30s
 PCP_RUNTIME_SYNC_CONCURRENCY=3
+PCP_TRAFFIC_SYNC_ENABLED=false
+PCP_TRAFFIC_SYNC_INTERVAL=5m
+PCP_TRAFFIC_SYNC_TIMEOUT=30s
+PCP_TRAFFIC_SYNC_CONCURRENCY=3
 ```
 
 For a remote PostgreSQL server, use `sslmode=require` when the server supports
@@ -293,6 +327,13 @@ diffs only changed nodes. Static users that already live in Xray config are not
 removed by this project. Do not store real customer contact emails in Xray's
 runtime `email` field; use PostgreSQL for customer identity and let the control
 plane generate the Xray runtime key.
+
+Traffic sync is also disabled by default. Enable `PCP_TRAFFIC_SYNC_ENABLED=true`
+after the Xray containers have been redeployed with `StatsService`, `stats: {}`
+and user stats policy enabled. The default interval is 5 minutes and the API
+timeout is 30 seconds. The collector uses Xray's reset mode, so each row written
+to `traffic_usage` is the traffic delta since the previous successful stats
+query.
 
 Runtime precedence is:
 
@@ -371,6 +412,8 @@ not try to read `.local/` from inside the image.
 ./proxy-control-plane db migrate
 ./proxy-control-plane db automigrate
 ./proxy-control-plane import xray-config --node xray-under-caddy-la-1 --file .local/imports/xray-under-caddy-la-1.json
+./proxy-control-plane import subscription-file --file .local/imports/legacy-public.txt --public-path /legacy-public.txt
+./proxy-control-plane maintenance cleanup --dry-run
 ./proxy-control-plane server serve
 ./proxy-control-plane docker up
 ```
@@ -383,8 +426,13 @@ Useful flags:
 ./proxy-control-plane server serve --database-url='postgres://user:password@host:5432/proxy_control?sslmode=require'
 ./proxy-control-plane server serve --auto-create-database=true --auto-migrate=true
 ./proxy-control-plane server serve --runtime-sync=true --runtime-sync-interval=5m
+./proxy-control-plane server serve --traffic-sync=true --traffic-sync-interval=5m
 ./proxy-control-plane import xray-config --node xray-under-caddy-la-1 --file .local/imports/xray-under-caddy-la-1.json
 ./proxy-control-plane import xray-config --node xray-fr-1 --file .local/imports/xray-fr-1.json --dry-run
+./proxy-control-plane import subscription-file --file .local/imports/legacy-public.txt --public-path /legacy-public.txt --dry-run
+./proxy-control-plane maintenance cleanup --dry-run
+./proxy-control-plane maintenance cleanup --dry-run=false
+./proxy-control-plane maintenance cleanup --traffic-retention=7d --traffic-max-size=1GB --traffic-daily-retention=180d --traffic-daily-max-size=2GB --audit-retention=180d --audit-max-size=1GB --dry-run
 ./proxy-control-plane db migrate --database-url='postgres://user:password@host:5432/proxy_control?sslmode=require'
 ./proxy-control-plane db migrate --migrations-dir=migrations
 ./proxy-control-plane db automigrate
@@ -397,6 +445,50 @@ location:
 ```bash
 ./proxy-control-plane --config-dir=.local --example-dir=.local.example config init
 ```
+
+## Maintenance
+
+Traffic details are intentionally append-only in `traffic_usage` so the project
+can keep precise history while data is fresh. Long-term history is stored in
+`traffic_usage_daily`, one row per account, node, and day. The cleanup defaults
+use both age and size caps:
+
+- `traffic_usage`: 7 days or 1GB, whichever cap is reached first
+- `traffic_usage_daily`: 180 days or 2GB, whichever cap is reached first
+- `audit_logs`: 180 days or 1GB, whichever cap is reached first
+
+Run cleanup in dry-run mode first:
+
+```bash
+./proxy-control-plane maintenance cleanup \
+  --audit-retention=180d \
+  --audit-max-size=1GB \
+  --traffic-retention=7d \
+  --traffic-max-size=1GB \
+  --traffic-daily-retention=180d \
+  --traffic-daily-max-size=2GB \
+  --dry-run
+```
+
+Run the write mode after checking the counts:
+
+```bash
+./proxy-control-plane maintenance cleanup \
+  --audit-retention=180d \
+  --audit-max-size=1GB \
+  --traffic-retention=7d \
+  --traffic-max-size=1GB \
+  --traffic-daily-retention=180d \
+  --traffic-daily-max-size=2GB \
+  --dry-run=false
+```
+
+The write path runs in one database transaction. It first aggregates old
+`traffic_usage` rows selected by age or size into `traffic_usage_daily`, then
+deletes those detail rows. It also deletes old `traffic_usage_daily` rows when
+the 180-day age cap or 2GB soft cap is reached, and deletes `audit_logs` when the
+180-day age cap or 1GB soft cap is reached. PostgreSQL may keep physical files
+allocated after deletes; the space is still reusable by future writes.
 
 ## Main API
 
@@ -441,16 +533,26 @@ Subscription tokens:
 - `PATCH /admin/subscription-tokens/{id}`
 - `POST /admin/subscription-tokens/{id}/rotate`
 
+Subscription aliases:
+
+- `GET /admin/subscription-aliases`
+- `POST /admin/subscription-aliases`
+- `GET /admin/subscription-aliases/{id}`
+- `PATCH /admin/subscription-aliases/{id}`
+- `DELETE /admin/subscription-aliases/{id}`
+
 Traffic:
 
 - `POST /admin/traffic-usage`
 
 Client subscription:
 
-- `GET /sub/{token}` returns base64 VLESS subscription content
+- `GET /sub/{token}` or `GET /sub/{token}?fmt=base64` returns base64 VLESS subscription content
 - `GET /sub/{token}?fmt=raw` returns raw VLESS URI text
+- `GET /legacy-sub/{old_public_path}` serves a registered legacy public path
 
-All admin endpoints except `/health`, `/admin/login`, and `/sub/{token}` require:
+All admin endpoints except `/health`, `/admin/login`, `/sub/{token}`, and
+`/legacy-sub/{old_public_path}` require:
 
 ```text
 Authorization: Bearer <access_token>
@@ -463,7 +565,9 @@ Authorization: Bearer <access_token>
 - `proxy_accounts`
 - `proxy_account_nodes`
 - `subscription_tokens`
+- `subscription_aliases`
 - `traffic_usage`
+- `traffic_usage_daily`
 - `audit_logs`
 - `schema_migrations`: tracks applied SQL migration files
 
@@ -480,6 +584,8 @@ Authorization: Bearer <access_token>
 7. Create customers, nodes, proxy accounts, account-node bindings, and
    subscription tokens.
 8. Give clients subscription URLs like `http://host:9710/sub/{token}`.
+9. Periodically run `./proxy-control-plane maintenance cleanup` to aggregate old
+   traffic detail and prune old audit rows.
 
 ## Verification
 

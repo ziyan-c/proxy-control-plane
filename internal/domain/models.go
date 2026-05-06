@@ -11,8 +11,9 @@ type Customer struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 
-	ProxyAccounts      []ProxyAccount      `json:"-" gorm:"foreignKey:CustomerID;constraint:OnDelete:CASCADE;"`
-	SubscriptionTokens []SubscriptionToken `json:"-" gorm:"foreignKey:CustomerID;constraint:OnDelete:CASCADE;"`
+	ProxyAccounts       []ProxyAccount      `json:"-" gorm:"foreignKey:CustomerID;constraint:OnDelete:CASCADE;"`
+	SubscriptionTokens  []SubscriptionToken `json:"-" gorm:"foreignKey:CustomerID;constraint:OnDelete:CASCADE;"`
+	SubscriptionAliases []SubscriptionAlias `json:"-" gorm:"foreignKey:CustomerID;constraint:OnDelete:CASCADE;"`
 }
 
 type ProxyNode struct {
@@ -81,6 +82,25 @@ type SubscriptionToken struct {
 	Customer Customer `json:"-" gorm:"foreignKey:CustomerID;constraint:OnDelete:CASCADE;"`
 }
 
+type SubscriptionAlias struct {
+	ID                string     `json:"id" gorm:"primaryKey;type:text"`
+	CustomerID        string     `json:"customer_id" gorm:"index;not null"`
+	Name              string     `json:"name" gorm:"not null"`
+	Path              string     `json:"path" gorm:"uniqueIndex;not null"`
+	PathHash          string     `json:"-" gorm:"uniqueIndex;not null"`
+	Enabled           bool       `json:"enabled" gorm:"index;not null"`
+	ExpiresAt         *time.Time `json:"expires_at,omitempty"`
+	SourcePath        string     `json:"source_path,omitempty"`
+	SourceSHA256      string     `json:"source_sha256,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	LastUsedAt        *time.Time `json:"last_used_at,omitempty"`
+	LastUsedIP        string     `json:"last_used_ip,omitempty"`
+	LastUsedUserAgent string     `json:"last_used_user_agent,omitempty"`
+
+	Customer Customer `json:"-" gorm:"foreignKey:CustomerID;constraint:OnDelete:CASCADE;"`
+}
+
 type TrafficUsage struct {
 	ID             string    `json:"id" gorm:"primaryKey;type:text"`
 	ProxyAccountID string    `json:"proxy_account_id" gorm:"index:ix_traffic_usage_account_recorded,priority:1;not null"`
@@ -93,11 +113,30 @@ type TrafficUsage struct {
 	ProxyNode    ProxyNode    `json:"-" gorm:"foreignKey:ProxyNodeID;constraint:OnDelete:CASCADE;"`
 }
 
+type TrafficUsageDaily struct {
+	ProxyAccountID string    `json:"proxy_account_id" gorm:"primaryKey;type:text;not null"`
+	ProxyNodeID    string    `json:"proxy_node_id" gorm:"primaryKey;type:text;not null"`
+	Day            time.Time `json:"day" gorm:"primaryKey;type:date;not null"`
+	UploadBytes    int64     `json:"upload_bytes" gorm:"not null"`
+	DownloadBytes  int64     `json:"download_bytes" gorm:"not null"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+
+	ProxyAccount ProxyAccount `json:"-" gorm:"foreignKey:ProxyAccountID;constraint:OnDelete:CASCADE;"`
+	ProxyNode    ProxyNode    `json:"-" gorm:"foreignKey:ProxyNodeID;constraint:OnDelete:CASCADE;"`
+}
+
 type RuntimeUser struct {
 	ProxyAccountID string `json:"proxy_account_id,omitempty"`
 	Email          string `json:"email"`
 	UUID           string `json:"uuid"`
 	Flow           string `json:"flow,omitempty"`
+}
+
+type TrafficDelta struct {
+	ProxyAccountID string `json:"proxy_account_id"`
+	UploadBytes    int64  `json:"upload_bytes"`
+	DownloadBytes  int64  `json:"download_bytes"`
 }
 
 type AuditLog struct {
@@ -110,6 +149,10 @@ type AuditLog struct {
 
 func (TrafficUsage) TableName() string {
 	return "traffic_usage"
+}
+
+func (TrafficUsageDaily) TableName() string {
+	return "traffic_usage_daily"
 }
 
 func (AuditLog) TableName() string {

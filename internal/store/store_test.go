@@ -101,3 +101,32 @@ func TestValidRuntimeAPIConfig(t *testing.T) {
 		t.Fatal("complete runtime API config should be valid")
 	}
 }
+
+func TestMatchLegacySubscriptionNode(t *testing.T) {
+	nodes := []domain.ProxyNode{
+		{
+			ID:         "node-1",
+			Name:       "under-caddy",
+			PublicHost: "proxy.example.com",
+			Protocol:   "vless",
+			Port:       443,
+			Transport:  "ws",
+			Security:   "tls",
+			Path:       "/v2ray",
+		},
+	}
+
+	node, ok := matchLegacySubscriptionNode(nodes, LegacySubscriptionLinkInput{
+		Host:      "proxy.example.com",
+		Port:      443,
+		Transport: "ws",
+		Security:  "tls",
+		Path:      "/v2ray",
+	})
+	if !ok {
+		t.Fatal("matchLegacySubscriptionNode() did not match")
+	}
+	if node.ID != "node-1" {
+		t.Fatalf("node.ID = %q, want node-1", node.ID)
+	}
+}

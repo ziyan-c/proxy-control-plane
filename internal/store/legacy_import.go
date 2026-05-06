@@ -32,6 +32,42 @@ type LegacyProxyAccountImportResult struct {
 	Skipped         int
 }
 
+type LegacySubscriptionLinkInput struct {
+	UUID             string
+	EmailTag         string
+	Flow             string
+	Host             string
+	Port             int
+	Transport        string
+	Security         string
+	Path             string
+	HostHeader       string
+	RealityPublicKey string
+	RealityShortID   string
+}
+
+type LegacySubscriptionFileImport struct {
+	CustomerEmail       string
+	CustomerDisplayName string
+	PublicPath          string
+	AliasName           string
+	SourcePath          string
+	SourceSHA256        string
+	EmailTagPrefix      string
+	Links               []LegacySubscriptionLinkInput
+}
+
+type LegacySubscriptionFileImportResult struct {
+	CustomerCreated int
+	AliasCreated    int
+	AliasUpdated    int
+	AccountCreated  int
+	AccountExisting int
+	NodeBindings    int
+	UnmatchedLinks  int
+	Skipped         int
+}
+
 func (s *Store) ImportLegacyProxyAccounts(ctx context.Context, input LegacyProxyAccountImport) (LegacyProxyAccountImportResult, error) {
 	var result LegacyProxyAccountImportResult
 	input.CustomerEmail = strings.TrimSpace(input.CustomerEmail)
@@ -96,6 +132,113 @@ func (s *Store) ImportLegacyProxyAccounts(ctx context.Context, input LegacyProxy
 	return result, err
 }
 
+func (s *Store) ImportLegacySubscriptionFile(ctx context.Context, input LegacySubscriptionFileImport) (LegacySubscriptionFileImportResult, error) {
+	var result LegacySubscriptionFileImportResult
+	input.CustomerEmail = strings.TrimSpace(input.CustomerEmail)
+	input.CustomerDisplayName = strings.TrimSpace(input.CustomerDisplayName)
+	input.PublicPath = strings.TrimSpace(input.PublicPath)
+	input.AliasName = strings.TrimSpace(input.AliasName)
+	input.SourcePath = strings.TrimSpace(input.SourcePath)
+	input.SourceSHA256 = strings.TrimSpace(input.SourceSHA256)
+	input.EmailTagPrefix = strings.TrimSpace(input.EmailTagPrefix)
+	if input.CustomerEmail == "" {
+		return result, ErrInvalid
+	}
+	if input.EmailTagPrefix == "" {
+		input.EmailTagPrefix = "legacy-public"
+	}
+
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		customer, createdCustomer, err := ensureCustomerByEmailTx(tx, input.CustomerEmail, input.CustomerDisplayName)
+		if err != nil {
+			return err
+		}
+		if createdCustomer {
+			result.CustomerCreated = 1
+		}
+
+		if input.PublicPath != "" {
+			createdAlias, err := upsertSubscriptionAliasByPathTx(tx, domain.SubscriptionAlias{
+				CustomerID:   customer.ID,
+				Name:         input.AliasName,
+				Path:         input.PublicPath,
+				Enabled:      true,
+				SourcePath:   input.SourcePath,
+				SourceSHA256: input.SourceSHA256,
+			})
+			if err != nil {
+				return err
+			}
+			if createdAlias {
+				result.AliasCreated = 1
+			} else {
+				result.AliasUpdated = 1
+			}
+		}
+
+		var nodes []domain.ProxyNode
+		if err := tx.Order("name ASC").Find(&nodes).Error; err != nil {
+			return mapGormError(err)
+		}
+
+		seenLinks := map[string]struct{}{}
+		for _, link := range input.Links {
+			link.UUID = strings.TrimSpace(link.UUID)
+			link.EmailTag = strings.TrimSpace(link.EmailTag)
+			link.Flow = strings.TrimSpace(link.Flow)
+			link.Host = strings.TrimSpace(link.Host)
+			link.Transport = strings.TrimSpace(link.Transport)
+			link.Security = strings.TrimSpace(link.Security)
+			link.Path = strings.TrimSpace(link.Path)
+			link.HostHeader = strings.TrimSpace(link.HostHeader)
+			link.RealityPublicKey = strings.TrimSpace(link.RealityPublicKey)
+			link.RealityShortID = strings.TrimSpace(link.RealityShortID)
+			if link.UUID == "" {
+				result.Skipped++
+				continue
+			}
+			key := legacySubscriptionLinkKey(link)
+			if _, exists := seenLinks[key]; exists {
+				result.Skipped++
+				continue
+			}
+			seenLinks[key] = struct{}{}
+			if link.EmailTag == "" {
+				link.EmailTag = input.EmailTagPrefix + "-" + shortValue(link.UUID)
+			}
+
+			account, createdAccount, err := upsertLegacyProxyAccountByUUIDTx(tx, customer.ID, LegacyProxyAccountInput{
+				UUID:     link.UUID,
+				EmailTag: link.EmailTag,
+				Flow:     link.Flow,
+			})
+			if err != nil {
+				return err
+			}
+			if createdAccount {
+				result.AccountCreated++
+			} else {
+				result.AccountExisting++
+			}
+
+			node, ok := matchLegacySubscriptionNode(nodes, link)
+			if !ok {
+				result.UnmatchedLinks++
+				continue
+			}
+			bound, err := bindProxyAccountNodeTx(tx, account.ID, node.ID)
+			if err != nil {
+				return err
+			}
+			if bound {
+				result.NodeBindings++
+			}
+		}
+		return nil
+	})
+	return result, err
+}
+
 func ensureCustomerByEmailTx(tx *gorm.DB, email string, displayName string) (domain.Customer, bool, error) {
 	var customer domain.Customer
 	err := tx.First(&customer, "email = ?", email).Error
@@ -120,7 +263,7 @@ func ensureCustomerByEmailTx(tx *gorm.DB, email string, displayName string) (dom
 		DisplayName: displayName,
 		Status:      "active",
 	}
-	if err := tx.Omit("ProxyAccounts", "SubscriptionTokens").Create(&customer).Error; err != nil {
+	if err := tx.Omit("ProxyAccounts", "SubscriptionTokens", "SubscriptionAliases").Create(&customer).Error; err != nil {
 		return domain.Customer{}, false, mapGormError(err)
 	}
 	return customer, true, nil
@@ -130,6 +273,9 @@ func upsertLegacyProxyAccountByUUIDTx(tx *gorm.DB, customerID string, input Lega
 	var account domain.ProxyAccount
 	err := tx.First(&account, "uuid = ?", input.UUID).Error
 	if err == nil {
+		if account.CustomerID != customerID {
+			return domain.ProxyAccount{}, false, fmt.Errorf("%w: existing proxy account UUID ending %s belongs to another customer", ErrInvalid, shortValue(input.UUID))
+		}
 		if strings.TrimSpace(account.Flow) != strings.TrimSpace(input.Flow) {
 			return domain.ProxyAccount{}, false, fmt.Errorf("%w: existing proxy account flow does not match imported Xray client flow for UUID ending %s", ErrInvalid, shortValue(input.UUID))
 		}
@@ -159,6 +305,50 @@ func upsertLegacyProxyAccountByUUIDTx(tx *gorm.DB, customerID string, input Lega
 	return account, true, nil
 }
 
+func upsertSubscriptionAliasByPathTx(tx *gorm.DB, alias domain.SubscriptionAlias) (bool, error) {
+	if err := setSubscriptionAliasDefaults(&alias); err != nil {
+		return false, err
+	}
+
+	var existing domain.SubscriptionAlias
+	err := tx.First(&existing, "path_hash = ?", alias.PathHash).Error
+	if err == nil {
+		if existing.CustomerID != alias.CustomerID {
+			return false, fmt.Errorf("%w: subscription alias path already belongs to another customer", ErrInvalid)
+		}
+		if alias.Name == "" {
+			alias.Name = existing.Name
+		}
+		existing.Name = alias.Name
+		existing.Path = alias.Path
+		existing.PathHash = alias.PathHash
+		existing.Enabled = alias.Enabled
+		existing.ExpiresAt = alias.ExpiresAt
+		existing.SourcePath = alias.SourcePath
+		existing.SourceSHA256 = alias.SourceSHA256
+		if err := tx.Omit("Customer").Save(&existing).Error; err != nil {
+			return false, mapGormError(err)
+		}
+		return false, nil
+	}
+	mapped := mapGormError(err)
+	if !errors.Is(mapped, ErrNotFound) {
+		return false, mapped
+	}
+
+	var idErr error
+	if alias.ID == "" {
+		alias.ID, idErr = security.NewID()
+		if idErr != nil {
+			return false, idErr
+		}
+	}
+	if err := tx.Omit("Customer").Create(&alias).Error; err != nil {
+		return false, mapGormError(err)
+	}
+	return true, nil
+}
+
 func bindProxyAccountNodeTx(tx *gorm.DB, accountID string, nodeID string) (bool, error) {
 	result := tx.Exec(
 		"INSERT INTO proxy_account_nodes (proxy_account_id, proxy_node_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
@@ -169,6 +359,81 @@ func bindProxyAccountNodeTx(tx *gorm.DB, accountID string, nodeID string) (bool,
 		return false, err
 	}
 	return result.RowsAffected > 0, nil
+}
+
+func legacySubscriptionLinkKey(link LegacySubscriptionLinkInput) string {
+	parts := []string{
+		strings.TrimSpace(link.UUID),
+		strings.ToLower(strings.TrimSpace(link.Host)),
+		fmt.Sprintf("%d", link.Port),
+		strings.ToLower(strings.TrimSpace(link.Transport)),
+		strings.ToLower(strings.TrimSpace(link.Security)),
+		strings.TrimSpace(link.Path),
+	}
+	return strings.Join(parts, "|")
+}
+
+func matchLegacySubscriptionNode(nodes []domain.ProxyNode, link LegacySubscriptionLinkInput) (domain.ProxyNode, bool) {
+	bestScore := -1
+	var best domain.ProxyNode
+	for _, node := range nodes {
+		if !strings.EqualFold(node.Protocol, "vless") {
+			continue
+		}
+		if !matchesNodeHost(node, link.Host) {
+			continue
+		}
+		if link.Port > 0 && node.Port != link.Port {
+			continue
+		}
+		score := 10
+		if link.Transport != "" {
+			if !strings.EqualFold(node.Transport, link.Transport) {
+				continue
+			}
+			score += 3
+		}
+		if link.Security != "" {
+			if !strings.EqualFold(node.Security, link.Security) {
+				continue
+			}
+			score += 3
+		}
+		if link.Path != "" {
+			if node.Path != link.Path {
+				continue
+			}
+			score += 3
+		}
+		if link.HostHeader != "" && node.HostHeader == link.HostHeader {
+			score++
+		}
+		if link.RealityPublicKey != "" {
+			if node.RealityPublicKey != link.RealityPublicKey {
+				continue
+			}
+			score += 3
+		}
+		if link.RealityShortID != "" && node.RealityShortID == link.RealityShortID {
+			score++
+		}
+		if score > bestScore {
+			bestScore = score
+			best = node
+		}
+	}
+	return best, bestScore >= 0
+}
+
+func matchesNodeHost(node domain.ProxyNode, host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(node.PublicHost, host) || strings.EqualFold(node.Hostname, host) {
+		return true
+	}
+	return false
 }
 
 func shortValue(value string) string {

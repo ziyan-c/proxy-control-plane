@@ -76,3 +76,58 @@ func TestBuildReturnsEmptyForInactiveCustomer(t *testing.T) {
 		t.Fatalf("body = %q, want empty", body)
 	}
 }
+
+func TestParseVLESSLinksAcceptsBase64Subscription(t *testing.T) {
+	raw := "vless://00000000-0000-4000-8000-000000000001@example.com:443?encryption=none&type=ws&security=tls&path=%2Fv2ray&host=example.com#legacy"
+	encoded := base64.StdEncoding.EncodeToString([]byte(raw + "\n"))
+
+	result, err := ParseLinks([]byte(encoded))
+	if err != nil {
+		t.Fatalf("ParseLinks() error = %v", err)
+	}
+	links := result.VLESSLinks
+	if len(links) != 1 {
+		t.Fatalf("len(links) = %d, want 1", len(links))
+	}
+	link := links[0]
+	if link.UUID != "00000000-0000-4000-8000-000000000001" {
+		t.Fatalf("UUID = %q", link.UUID)
+	}
+	if link.Transport != "ws" || link.Security != "tls" || link.Path != "/v2ray" || link.HostHeader != "example.com" {
+		t.Fatalf("parsed link = %+v", link)
+	}
+	if link.EmailTag != "legacy" {
+		t.Fatalf("EmailTag = %q, want legacy", link.EmailTag)
+	}
+}
+
+func TestParseLinksCountsUnsupportedURIs(t *testing.T) {
+	raw := strings.Join([]string{
+		"trojan://password@example.com:443",
+		"vless://00000000-0000-4000-8000-000000000001@example.com:443?encryption=none",
+	}, "\n")
+
+	result, err := ParseLinks([]byte(raw))
+	if err != nil {
+		t.Fatalf("ParseLinks() error = %v", err)
+	}
+	if len(result.VLESSLinks) != 1 {
+		t.Fatalf("len(VLESSLinks) = %d, want 1", len(result.VLESSLinks))
+	}
+	if result.UnsupportedURIs != 1 {
+		t.Fatalf("UnsupportedURIs = %d, want 1", result.UnsupportedURIs)
+	}
+}
+
+func TestCanonicalAliasPath(t *testing.T) {
+	path, err := CanonicalAliasPath("https://example.com/public/vless.txt?x=1")
+	if err != nil {
+		t.Fatalf("CanonicalAliasPath() error = %v", err)
+	}
+	if path != "/public/vless.txt" {
+		t.Fatalf("path = %q, want /public/vless.txt", path)
+	}
+	if _, err := CanonicalAliasPath("/"); err == nil {
+		t.Fatal("CanonicalAliasPath(/) succeeded, want error")
+	}
+}

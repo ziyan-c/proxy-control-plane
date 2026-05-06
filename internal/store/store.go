@@ -159,7 +159,7 @@ func (s *Store) CreateCustomer(ctx context.Context, customer domain.Customer) (d
 	if customer.Status == "" {
 		customer.Status = "active"
 	}
-	if err := s.db.WithContext(ctx).Omit("ProxyAccounts", "SubscriptionTokens").Create(&customer).Error; err != nil {
+	if err := s.db.WithContext(ctx).Omit("ProxyAccounts", "SubscriptionTokens", "SubscriptionAliases").Create(&customer).Error; err != nil {
 		return domain.Customer{}, mapGormError(err)
 	}
 	return customer, nil
@@ -184,7 +184,7 @@ func (s *Store) UpdateCustomer(ctx context.Context, customer domain.Customer) (d
 	if _, err := s.GetCustomer(ctx, customer.ID); err != nil {
 		return domain.Customer{}, err
 	}
-	if err := s.db.WithContext(ctx).Omit("ProxyAccounts", "SubscriptionTokens").Save(&customer).Error; err != nil {
+	if err := s.db.WithContext(ctx).Omit("ProxyAccounts", "SubscriptionTokens", "SubscriptionAliases").Save(&customer).Error; err != nil {
 		return domain.Customer{}, mapGormError(err)
 	}
 	return s.GetCustomer(ctx, customer.ID)

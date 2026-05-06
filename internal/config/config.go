@@ -23,6 +23,10 @@ type Config struct {
 	RuntimeSyncInterval      time.Duration
 	RuntimeSyncTimeout       time.Duration
 	RuntimeSyncConcurrency   int
+	TrafficSyncEnabled       bool
+	TrafficSyncInterval      time.Duration
+	TrafficSyncTimeout       time.Duration
+	TrafficSyncConcurrency   int
 }
 
 func Load() Config {
@@ -41,6 +45,10 @@ func Load() Config {
 		RuntimeSyncInterval:      getEnvDuration("PCP_RUNTIME_SYNC_INTERVAL", 5*time.Minute),
 		RuntimeSyncTimeout:       getEnvDuration("PCP_RUNTIME_SYNC_TIMEOUT", 30*time.Second),
 		RuntimeSyncConcurrency:   getEnvInt("PCP_RUNTIME_SYNC_CONCURRENCY", 3),
+		TrafficSyncEnabled:       getEnvBool("PCP_TRAFFIC_SYNC_ENABLED", false),
+		TrafficSyncInterval:      getEnvDuration("PCP_TRAFFIC_SYNC_INTERVAL", 5*time.Minute),
+		TrafficSyncTimeout:       getEnvDuration("PCP_TRAFFIC_SYNC_TIMEOUT", 30*time.Second),
+		TrafficSyncConcurrency:   getEnvInt("PCP_TRAFFIC_SYNC_CONCURRENCY", 3),
 	}
 }
 
@@ -71,6 +79,17 @@ func (c Config) ValidateServer() error {
 		}
 		if c.RuntimeSyncConcurrency <= 0 {
 			problems = append(problems, "PCP_RUNTIME_SYNC_CONCURRENCY must be greater than 0")
+		}
+	}
+	if c.TrafficSyncEnabled {
+		if c.TrafficSyncInterval <= 0 {
+			problems = append(problems, "PCP_TRAFFIC_SYNC_INTERVAL must be greater than 0")
+		}
+		if c.TrafficSyncTimeout <= 0 {
+			problems = append(problems, "PCP_TRAFFIC_SYNC_TIMEOUT must be greater than 0")
+		}
+		if c.TrafficSyncConcurrency <= 0 {
+			problems = append(problems, "PCP_TRAFFIC_SYNC_CONCURRENCY must be greater than 0")
 		}
 	}
 	if len(problems) > 0 {

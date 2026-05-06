@@ -9,6 +9,7 @@ import (
 	"time"
 
 	xraycommand "github.com/xtls/xray-core/app/proxyman/command"
+	xraystats "github.com/xtls/xray-core/app/stats/command"
 	xrayprotocol "github.com/xtls/xray-core/common/protocol"
 	xrayserial "github.com/xtls/xray-core/common/serial"
 	xrayvless "github.com/xtls/xray-core/proxy/vless"
@@ -96,7 +97,70 @@ func (c XrayClient) RemoveUser(ctx context.Context, node domain.ProxyNode, email
 	return err
 }
 
+func (c XrayClient) QueryTraffic(ctx context.Context, node domain.ProxyNode, reset bool) ([]domain.TrafficDelta, error) {
+	client, closeConn, err := c.statsClient(node)
+	if err != nil {
+		return nil, err
+	}
+	defer closeConn()
+
+	rpcCtx, cancel := c.rpcContext(ctx)
+	defer cancel()
+
+	response, err := client.QueryStats(rpcCtx, &xraystats.QueryStatsRequest{
+		Pattern: "user>>>pcp-",
+		Reset_:  reset,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	byAccount := make(map[string]*domain.TrafficDelta)
+	for _, stat := range response.GetStat() {
+		accountID, direction, ok := parseManagedTrafficStat(stat.GetName())
+		if !ok || stat.GetValue() <= 0 {
+			continue
+		}
+		delta := byAccount[accountID]
+		if delta == nil {
+			delta = &domain.TrafficDelta{ProxyAccountID: accountID}
+			byAccount[accountID] = delta
+		}
+		switch direction {
+		case "uplink":
+			delta.UploadBytes += stat.GetValue()
+		case "downlink":
+			delta.DownloadBytes += stat.GetValue()
+		}
+	}
+
+	result := make([]domain.TrafficDelta, 0, len(byAccount))
+	for _, delta := range byAccount {
+		if delta.UploadBytes == 0 && delta.DownloadBytes == 0 {
+			continue
+		}
+		result = append(result, *delta)
+	}
+	return result, nil
+}
+
 func (c XrayClient) handlerClient(node domain.ProxyNode) (xraycommand.HandlerServiceClient, func(), error) {
+	conn, closeConn, err := c.grpcConn(node)
+	if err != nil {
+		return nil, nil, err
+	}
+	return xraycommand.NewHandlerServiceClient(conn), closeConn, nil
+}
+
+func (c XrayClient) statsClient(node domain.ProxyNode) (xraystats.StatsServiceClient, func(), error) {
+	conn, closeConn, err := c.grpcConn(node)
+	if err != nil {
+		return nil, nil, err
+	}
+	return xraystats.NewStatsServiceClient(conn), closeConn, nil
+}
+
+func (c XrayClient) grpcConn(node domain.ProxyNode) (*grpc.ClientConn, func(), error) {
 	if strings.TrimSpace(node.RuntimeAPIHost) == "" || node.RuntimeAPIPort == 0 {
 		return nil, nil, fmt.Errorf("node %s has incomplete runtime API address", node.Name)
 	}
@@ -105,7 +169,7 @@ func (c XrayClient) handlerClient(node domain.ProxyNode) (xraycommand.HandlerSer
 	if err != nil {
 		return nil, nil, err
 	}
-	return xraycommand.NewHandlerServiceClient(conn), func() { _ = conn.Close() }, nil
+	return conn, func() { _ = conn.Close() }, nil
 }
 
 func (c XrayClient) rpcContext(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -132,4 +196,25 @@ func parseVLESSUser(user *xrayprotocol.User) (domain.RuntimeUser, bool, error) {
 		UUID:  account.GetId(),
 		Flow:  account.GetFlow(),
 	}, true, nil
+}
+
+func parseManagedTrafficStat(name string) (string, string, bool) {
+	const prefix = "user>>>"
+	const trafficMarker = ">>>traffic>>>"
+	if !strings.HasPrefix(name, prefix) {
+		return "", "", false
+	}
+	rest := strings.TrimPrefix(name, prefix)
+	email, direction, ok := strings.Cut(rest, trafficMarker)
+	if !ok {
+		return "", "", false
+	}
+	accountID, ok := domain.ProxyAccountIDFromRuntimeEmail(email)
+	if !ok {
+		return "", "", false
+	}
+	if direction != "uplink" && direction != "downlink" {
+		return "", "", false
+	}
+	return accountID, direction, true
 }

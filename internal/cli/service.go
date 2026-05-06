@@ -17,6 +17,7 @@ import (
 	"github.com/ziyan-c/proxy-control-plane/internal/httpapi"
 	"github.com/ziyan-c/proxy-control-plane/internal/runtimesync"
 	"github.com/ziyan-c/proxy-control-plane/internal/store"
+	"github.com/ziyan-c/proxy-control-plane/internal/trafficsync"
 )
 
 type serviceOptions struct {
@@ -29,6 +30,10 @@ type serviceOptions struct {
 	runtimeSyncInterval    string
 	runtimeSyncTimeout     string
 	runtimeSyncConcurrency int
+	trafficSync            string
+	trafficSyncInterval    string
+	trafficSyncTimeout     string
+	trafficSyncConcurrency int
 	migrationsDir          string
 	noLocalConfig          bool
 }
@@ -66,6 +71,10 @@ func newServerServeCommand(rootOpts *Options) *cobra.Command {
 	cmd.Flags().StringVar(&opts.runtimeSyncInterval, "runtime-sync-interval", "", "interval for runtime inspect and diff sync, for example 5m")
 	cmd.Flags().StringVar(&opts.runtimeSyncTimeout, "runtime-sync-timeout", "", "timeout per runtime API call, for example 30s")
 	cmd.Flags().IntVar(&opts.runtimeSyncConcurrency, "runtime-sync-concurrency", 0, "maximum runtime nodes to inspect in parallel")
+	cmd.Flags().StringVar(&opts.trafficSync, "traffic-sync", "", "true or false; enable Xray StatsService traffic collection")
+	cmd.Flags().StringVar(&opts.trafficSyncInterval, "traffic-sync-interval", "", "interval for Xray traffic stats collection, for example 5m")
+	cmd.Flags().StringVar(&opts.trafficSyncTimeout, "traffic-sync-timeout", "", "timeout per Xray stats API call, for example 30s")
+	cmd.Flags().IntVar(&opts.trafficSyncConcurrency, "traffic-sync-concurrency", 0, "maximum Xray nodes to collect traffic from in parallel")
 	return cmd
 }
 
@@ -218,6 +227,30 @@ func applyServiceOptions(cfg *config.Config, opts *serviceOptions) error {
 	if opts.runtimeSyncConcurrency > 0 {
 		cfg.RuntimeSyncConcurrency = opts.runtimeSyncConcurrency
 	}
+	if opts.trafficSync != "" {
+		value, err := strconv.ParseBool(opts.trafficSync)
+		if err != nil {
+			return fmt.Errorf("--traffic-sync must be true or false: %w", err)
+		}
+		cfg.TrafficSyncEnabled = value
+	}
+	if opts.trafficSyncInterval != "" {
+		value, err := time.ParseDuration(opts.trafficSyncInterval)
+		if err != nil {
+			return fmt.Errorf("--traffic-sync-interval must be a duration such as 5m: %w", err)
+		}
+		cfg.TrafficSyncInterval = value
+	}
+	if opts.trafficSyncTimeout != "" {
+		value, err := time.ParseDuration(opts.trafficSyncTimeout)
+		if err != nil {
+			return fmt.Errorf("--traffic-sync-timeout must be a duration such as 30s: %w", err)
+		}
+		cfg.TrafficSyncTimeout = value
+	}
+	if opts.trafficSyncConcurrency > 0 {
+		cfg.TrafficSyncConcurrency = opts.trafficSyncConcurrency
+	}
 	return nil
 }
 
@@ -247,6 +280,15 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store) error {
 			Interval:    cfg.RuntimeSyncInterval,
 			Timeout:     cfg.RuntimeSyncTimeout,
 			Concurrency: cfg.RuntimeSyncConcurrency,
+		})
+		go syncer.Run(serveCtx)
+	}
+	if cfg.TrafficSyncEnabled {
+		syncer := trafficsync.New(st, runtimesync.XrayClient{Timeout: cfg.TrafficSyncTimeout}, trafficsync.Options{
+			Interval:    cfg.TrafficSyncInterval,
+			Timeout:     cfg.TrafficSyncTimeout,
+			Concurrency: cfg.TrafficSyncConcurrency,
+			Reset:       true,
 		})
 		go syncer.Run(serveCtx)
 	}
