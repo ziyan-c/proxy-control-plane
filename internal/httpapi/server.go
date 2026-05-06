@@ -3,6 +3,7 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -24,7 +25,7 @@ type Server struct {
 func New(cfg config.Config, st *store.Store) http.Handler {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
-	router.Use(gin.Logger(), gin.Recovery())
+	router.Use(gin.LoggerWithFormatter(redactingGinLogFormatter), gin.Recovery())
 
 	server := &Server{
 		cfg:   cfg,
@@ -73,6 +74,44 @@ func (s *Server) routes(router *gin.Engine) {
 	admin.DELETE("/subscription-aliases/:id", s.deleteSubscriptionAlias)
 
 	admin.POST("/traffic-usage", s.recordTrafficUsage)
+}
+
+func redactingGinLogFormatter(param gin.LogFormatterParams) string {
+	param.Path = redactLogPath(param.Path)
+	switch {
+	case param.Latency > time.Minute:
+		param.Latency = param.Latency.Truncate(time.Second * 10)
+	case param.Latency > time.Second:
+		param.Latency = param.Latency.Truncate(time.Millisecond * 10)
+	case param.Latency > time.Millisecond:
+		param.Latency = param.Latency.Truncate(time.Microsecond * 10)
+	}
+
+	return fmt.Sprintf("[GIN] %v | %3d | %8v | %15s | %-7s %#v\n%s",
+		param.TimeStamp.Format("2006/01/02 - 15:04:05"),
+		param.StatusCode,
+		param.Latency,
+		param.ClientIP,
+		param.Method,
+		param.Path,
+		param.ErrorMessage,
+	)
+}
+
+func redactLogPath(path string) string {
+	rawQuery := ""
+	if i := strings.Index(path, "?"); i >= 0 {
+		rawQuery = path[i:]
+		path = path[:i]
+	}
+	switch {
+	case path == "/sub" || strings.HasPrefix(path, "/sub/"):
+		return "/sub/<redacted>" + rawQuery
+	case path == "/legacy-sub" || strings.HasPrefix(path, "/legacy-sub/"):
+		return "/legacy-sub/<redacted>" + rawQuery
+	default:
+		return path + rawQuery
+	}
 }
 
 func (s *Server) health(c *gin.Context) {

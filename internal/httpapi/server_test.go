@@ -112,6 +112,38 @@ func TestSyncNodesRejectsInvalidRuntime(t *testing.T) {
 	}
 }
 
+func TestRedactLogPath(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{
+			name: "subscription token",
+			path: "/sub/secret-token?fmt=raw",
+			want: "/sub/<redacted>?fmt=raw",
+		},
+		{
+			name: "legacy subscription path",
+			path: "/legacy-sub/v2ray/PUBLIC-29451172-2d7b-48e7-a43f-35e5b1e0199a",
+			want: "/legacy-sub/<redacted>",
+		},
+		{
+			name: "admin path",
+			path: "/admin/customers",
+			want: "/admin/customers",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := redactLogPath(tc.path); got != tc.want {
+				t.Fatalf("redactLogPath() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func patchContext(body string) (*gin.Context, *httptest.ResponseRecorder) {
 	return requestContext(http.MethodPatch, body)
 }
