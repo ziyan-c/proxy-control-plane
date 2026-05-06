@@ -46,7 +46,7 @@ func Load() Config {
 		RuntimeSyncTimeout:       getEnvDuration("PCP_RUNTIME_SYNC_TIMEOUT", 30*time.Second),
 		RuntimeSyncConcurrency:   getEnvInt("PCP_RUNTIME_SYNC_CONCURRENCY", 3),
 		TrafficSyncEnabled:       getEnvBool("PCP_TRAFFIC_SYNC_ENABLED", false),
-		TrafficSyncInterval:      getEnvDuration("PCP_TRAFFIC_SYNC_INTERVAL", 5*time.Minute),
+		TrafficSyncInterval:      getEnvDuration("PCP_TRAFFIC_SYNC_INTERVAL", 10*time.Minute),
 		TrafficSyncTimeout:       getEnvDuration("PCP_TRAFFIC_SYNC_TIMEOUT", 30*time.Second),
 		TrafficSyncConcurrency:   getEnvInt("PCP_TRAFFIC_SYNC_CONCURRENCY", 3),
 	}

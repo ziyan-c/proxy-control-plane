@@ -38,7 +38,6 @@ func newMaintenanceCleanupCommand(rootOpts *Options) *cobra.Command {
 		trafficMaxSize:        "1GB",
 		trafficDailyRetention: "180d",
 		trafficDailyMaxSize:   "2GB",
-		dryRun:                true,
 	}
 
 	cmd := &cobra.Command{

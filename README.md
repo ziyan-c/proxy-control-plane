@@ -305,7 +305,7 @@ PCP_RUNTIME_SYNC_INTERVAL=5m
 PCP_RUNTIME_SYNC_TIMEOUT=30s
 PCP_RUNTIME_SYNC_CONCURRENCY=3
 PCP_TRAFFIC_SYNC_ENABLED=false
-PCP_TRAFFIC_SYNC_INTERVAL=5m
+PCP_TRAFFIC_SYNC_INTERVAL=10m
 PCP_TRAFFIC_SYNC_TIMEOUT=30s
 PCP_TRAFFIC_SYNC_CONCURRENCY=3
 ```
@@ -330,7 +330,7 @@ plane generate the Xray runtime key.
 
 Traffic sync is also disabled by default. Enable `PCP_TRAFFIC_SYNC_ENABLED=true`
 after the Xray containers have been redeployed with `StatsService`, `stats: {}`
-and user stats policy enabled. The default interval is 5 minutes and the API
+and user stats policy enabled. The default interval is 10 minutes and the API
 timeout is 30 seconds. The collector uses Xray's reset mode, so each row written
 to `traffic_usage` is the traffic delta since the previous successful stats
 query.
@@ -413,7 +413,7 @@ not try to read `.local/` from inside the image.
 ./proxy-control-plane db automigrate
 ./proxy-control-plane import xray-config --node xray-under-caddy-la-1 --file .local/imports/xray-under-caddy-la-1.json
 ./proxy-control-plane import subscription-file --file .local/imports/legacy-public.txt --public-path /legacy-public.txt
-./proxy-control-plane maintenance cleanup --dry-run
+./proxy-control-plane maintenance cleanup
 ./proxy-control-plane server serve
 ./proxy-control-plane docker up
 ```
@@ -426,13 +426,13 @@ Useful flags:
 ./proxy-control-plane server serve --database-url='postgres://user:password@host:5432/proxy_control?sslmode=require'
 ./proxy-control-plane server serve --auto-create-database=true --auto-migrate=true
 ./proxy-control-plane server serve --runtime-sync=true --runtime-sync-interval=5m
-./proxy-control-plane server serve --traffic-sync=true --traffic-sync-interval=5m
+./proxy-control-plane server serve --traffic-sync=true --traffic-sync-interval=10m
 ./proxy-control-plane import xray-config --node xray-under-caddy-la-1 --file .local/imports/xray-under-caddy-la-1.json
 ./proxy-control-plane import xray-config --node xray-fr-1 --file .local/imports/xray-fr-1.json --dry-run
 ./proxy-control-plane import subscription-file --file .local/imports/legacy-public.txt --public-path /legacy-public.txt --dry-run
 ./proxy-control-plane maintenance cleanup --dry-run
-./proxy-control-plane maintenance cleanup --dry-run=false
-./proxy-control-plane maintenance cleanup --traffic-retention=7d --traffic-max-size=1GB --traffic-daily-retention=180d --traffic-daily-max-size=2GB --audit-retention=180d --audit-max-size=1GB --dry-run
+./proxy-control-plane maintenance cleanup
+./proxy-control-plane maintenance cleanup --traffic-retention=7d --traffic-max-size=1GB --traffic-daily-retention=180d --traffic-daily-max-size=2GB --audit-retention=180d --audit-max-size=1GB
 ./proxy-control-plane db migrate --database-url='postgres://user:password@host:5432/proxy_control?sslmode=require'
 ./proxy-control-plane db migrate --migrations-dir=migrations
 ./proxy-control-plane db automigrate
@@ -470,7 +470,8 @@ Run cleanup in dry-run mode first:
   --dry-run
 ```
 
-Run the write mode after checking the counts:
+Run the write mode after checking the counts. Without `--dry-run`, cleanup
+writes to PostgreSQL:
 
 ```bash
 ./proxy-control-plane maintenance cleanup \
@@ -479,8 +480,7 @@ Run the write mode after checking the counts:
   --traffic-retention=7d \
   --traffic-max-size=1GB \
   --traffic-daily-retention=180d \
-  --traffic-daily-max-size=2GB \
-  --dry-run=false
+  --traffic-daily-max-size=2GB
 ```
 
 The write path runs in one database transaction. It first aggregates old
