@@ -268,7 +268,7 @@ migrations/               版本化 SQL 数据库迁移
 关键配置项：
 
 ```env
-PCP_LISTEN_ADDR=127.0.0.1:9710
+PCP_LISTEN_ADDR=0.0.0.0:9710
 PCP_DATABASE_URL=postgres://user:password@host:5432/proxy_control?sslmode=require
 PCP_ADMIN_EMAIL=admin@proxy.example
 PCP_ADMIN_PASSWORD=change-this-to-a-long-admin-password
@@ -393,8 +393,11 @@ Docker 命令默认读取 `.local/app.env`，并通过 `PCP_APP_ENV_FILE` 传给
 ```
 
 也就是说，Compose 负责注入环境变量，容器不会再去镜像内部读取 `.local/`。
-Compose 使用 `restart: unless-stopped`，所以机器重启或容器异常退出后，Docker 会
-自动拉起 API 容器，除非你明确 stop 它。
+所有 `PCP_*` 运行配置都放在 env file 里；Compose 只描述容器和端口绑定。
+Docker 场景下 env file 里的 `PCP_LISTEN_ADDR` 应该写成 `0.0.0.0:9710`，
+再通过 Compose 的 `ports` 绑定限制宿主机暴露范围。Compose 使用
+`restart: unless-stopped`，所以机器重启或容器异常退出后，Docker 会自动拉起
+API 容器，除非你明确 stop 它。
 
 ## GitHub Container Registry 发布
 
@@ -404,13 +407,13 @@ Registry。它使用内置的 `GITHUB_TOKEN`，不需要配置 Docker Hub secret
 然后创建并推送 semver tag：
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 发布 workflow 会构建并推送：
 
-- `ghcr.io/ziyan-c/proxy-control-plane:0.1.0`
+- `ghcr.io/ziyan-c/proxy-control-plane:0.1.1`
 - `ghcr.io/ziyan-c/proxy-control-plane:0.1`
 - `ghcr.io/ziyan-c/proxy-control-plane:0`
 - 非 prerelease 版本会额外推 `ghcr.io/ziyan-c/proxy-control-plane:latest`

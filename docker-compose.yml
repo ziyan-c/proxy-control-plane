@@ -8,8 +8,6 @@ services:
     build: .
     env_file:
       - ${PCP_APP_ENV_FILE:-.local/app.env}
-    environment:
-      PCP_LISTEN_ADDR: 0.0.0.0:9710
     ports:
       - "127.0.0.1:9710:9710"
 

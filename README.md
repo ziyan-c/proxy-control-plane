@@ -293,7 +293,7 @@ Then edit `.local/app.env`.
 Important variables:
 
 ```env
-PCP_LISTEN_ADDR=127.0.0.1:9710
+PCP_LISTEN_ADDR=0.0.0.0:9710
 PCP_DATABASE_URL=postgres://user:password@host:5432/proxy_control?sslmode=require
 PCP_ADMIN_EMAIL=admin@proxy.example
 PCP_ADMIN_PASSWORD=change-this-to-a-long-admin-password
@@ -426,7 +426,10 @@ The Docker command reads `.local/app.env` by default and passes it to Compose as
 ```
 
 That means Docker Compose injects environment variables, and the container does
-not try to read `.local/` from inside the image. Compose uses
+not try to read `.local/` from inside the image. Keep every `PCP_*` runtime
+setting in the env file; Compose only describes the container and port binding.
+For Docker, set `PCP_LISTEN_ADDR=0.0.0.0:9710` in that env file, then restrict
+host exposure through the Compose `ports` binding. Compose uses
 `restart: unless-stopped`, so Docker restarts the API container after machine
 reboot or unexpected container exit unless you explicitly stop it.
 
@@ -439,13 +442,13 @@ secret is required.
 Then create and push a semver tag:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 The release workflow builds and pushes:
 
-- `ghcr.io/ziyan-c/proxy-control-plane:0.1.0`
+- `ghcr.io/ziyan-c/proxy-control-plane:0.1.1`
 - `ghcr.io/ziyan-c/proxy-control-plane:0.1`
 - `ghcr.io/ziyan-c/proxy-control-plane:0`
 - `ghcr.io/ziyan-c/proxy-control-plane:latest` for non-prerelease tags
