@@ -47,25 +47,24 @@ type LegacySubscriptionLinkInput struct {
 }
 
 type LegacySubscriptionFileImport struct {
-	CustomerEmail       string
-	CustomerDisplayName string
-	PublicPath          string
-	AliasName           string
-	SourcePath          string
-	SourceSHA256        string
-	EmailTagPrefix      string
-	Links               []LegacySubscriptionLinkInput
+	CustomerEmail         string
+	CustomerDisplayName   string
+	EmailTagPrefix        string
+	SubscriptionToken     bool
+	SubscriptionTokenName string
+	DatabaseEncryptionKey string
+	Links                 []LegacySubscriptionLinkInput
 }
 
 type LegacySubscriptionFileImportResult struct {
-	CustomerCreated int
-	AliasCreated    int
-	AliasUpdated    int
-	AccountCreated  int
-	AccountExisting int
-	NodeBindings    int
-	UnmatchedLinks  int
-	Skipped         int
+	CustomerCreated          int
+	SubscriptionTokenCreated int
+	PlainSubscriptionToken   string
+	AccountCreated           int
+	AccountExisting          int
+	NodeBindings             int
+	UnmatchedLinks           int
+	Skipped                  int
 }
 
 func (s *Store) ImportLegacyProxyAccounts(ctx context.Context, input LegacyProxyAccountImport) (LegacyProxyAccountImportResult, error) {
@@ -136,16 +135,16 @@ func (s *Store) ImportLegacySubscriptionFile(ctx context.Context, input LegacySu
 	var result LegacySubscriptionFileImportResult
 	input.CustomerEmail = strings.TrimSpace(input.CustomerEmail)
 	input.CustomerDisplayName = strings.TrimSpace(input.CustomerDisplayName)
-	input.PublicPath = strings.TrimSpace(input.PublicPath)
-	input.AliasName = strings.TrimSpace(input.AliasName)
-	input.SourcePath = strings.TrimSpace(input.SourcePath)
-	input.SourceSHA256 = strings.TrimSpace(input.SourceSHA256)
 	input.EmailTagPrefix = strings.TrimSpace(input.EmailTagPrefix)
+	input.SubscriptionTokenName = strings.TrimSpace(input.SubscriptionTokenName)
 	if input.CustomerEmail == "" {
 		return result, ErrInvalid
 	}
 	if input.EmailTagPrefix == "" {
 		input.EmailTagPrefix = "legacy-public"
+	}
+	if input.SubscriptionTokenName == "" {
+		input.SubscriptionTokenName = "legacy-public"
 	}
 
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -157,22 +156,14 @@ func (s *Store) ImportLegacySubscriptionFile(ctx context.Context, input LegacySu
 			result.CustomerCreated = 1
 		}
 
-		if input.PublicPath != "" {
-			createdAlias, err := upsertSubscriptionAliasByPathTx(tx, domain.SubscriptionAlias{
-				CustomerID:   customer.ID,
-				Name:         input.AliasName,
-				Path:         input.PublicPath,
-				Enabled:      true,
-				SourcePath:   input.SourcePath,
-				SourceSHA256: input.SourceSHA256,
-			})
+		if input.SubscriptionToken {
+			createdToken, plainToken, err := ensureSubscriptionTokenTx(tx, customer.ID, input.SubscriptionTokenName, input.DatabaseEncryptionKey)
 			if err != nil {
 				return err
 			}
-			if createdAlias {
-				result.AliasCreated = 1
-			} else {
-				result.AliasUpdated = 1
+			if createdToken {
+				result.SubscriptionTokenCreated = 1
+				result.PlainSubscriptionToken = plainToken
 			}
 		}
 
@@ -263,7 +254,7 @@ func ensureCustomerByEmailTx(tx *gorm.DB, email string, displayName string) (dom
 		DisplayName: displayName,
 		Status:      "active",
 	}
-	if err := tx.Omit("ProxyAccounts", "SubscriptionTokens", "SubscriptionAliases").Create(&customer).Error; err != nil {
+	if err := tx.Omit("ProxyAccounts", "SubscriptionTokens").Create(&customer).Error; err != nil {
 		return domain.Customer{}, false, mapGormError(err)
 	}
 	return customer, true, nil
@@ -305,50 +296,6 @@ func upsertLegacyProxyAccountByUUIDTx(tx *gorm.DB, customerID string, input Lega
 	return account, true, nil
 }
 
-func upsertSubscriptionAliasByPathTx(tx *gorm.DB, alias domain.SubscriptionAlias) (bool, error) {
-	if err := setSubscriptionAliasDefaults(&alias); err != nil {
-		return false, err
-	}
-
-	var existing domain.SubscriptionAlias
-	err := tx.First(&existing, "path_hash = ?", alias.PathHash).Error
-	if err == nil {
-		if existing.CustomerID != alias.CustomerID {
-			return false, fmt.Errorf("%w: subscription alias path already belongs to another customer", ErrInvalid)
-		}
-		if alias.Name == "" {
-			alias.Name = existing.Name
-		}
-		existing.Name = alias.Name
-		existing.Path = alias.Path
-		existing.PathHash = alias.PathHash
-		existing.Enabled = alias.Enabled
-		existing.ExpiresAt = alias.ExpiresAt
-		existing.SourcePath = alias.SourcePath
-		existing.SourceSHA256 = alias.SourceSHA256
-		if err := tx.Omit("Customer").Save(&existing).Error; err != nil {
-			return false, mapGormError(err)
-		}
-		return false, nil
-	}
-	mapped := mapGormError(err)
-	if !errors.Is(mapped, ErrNotFound) {
-		return false, mapped
-	}
-
-	var idErr error
-	if alias.ID == "" {
-		alias.ID, idErr = security.NewID()
-		if idErr != nil {
-			return false, idErr
-		}
-	}
-	if err := tx.Omit("Customer").Create(&alias).Error; err != nil {
-		return false, mapGormError(err)
-	}
-	return true, nil
-}
-
 func bindProxyAccountNodeTx(tx *gorm.DB, accountID string, nodeID string) (bool, error) {
 	result := tx.Exec(
 		"INSERT INTO proxy_account_nodes (proxy_account_id, proxy_node_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
@@ -359,6 +306,41 @@ func bindProxyAccountNodeTx(tx *gorm.DB, accountID string, nodeID string) (bool,
 		return false, err
 	}
 	return result.RowsAffected > 0, nil
+}
+
+func ensureSubscriptionTokenTx(tx *gorm.DB, customerID string, name string, databaseEncryptionKey string) (bool, string, error) {
+	var count int64
+	if err := tx.Model(&domain.SubscriptionToken{}).Where("customer_id = ?", customerID).Count(&count).Error; err != nil {
+		return false, "", mapGormError(err)
+	}
+	if count > 0 {
+		return false, "", nil
+	}
+
+	id, err := security.NewID()
+	if err != nil {
+		return false, "", err
+	}
+	plainToken, err := security.NewRandomToken()
+	if err != nil {
+		return false, "", err
+	}
+	encryptedToken, err := security.EncryptStringWithBase64Key(databaseEncryptionKey, plainToken)
+	if err != nil {
+		return false, "", err
+	}
+	token := domain.SubscriptionToken{
+		ID:             id,
+		CustomerID:     customerID,
+		Name:           name,
+		TokenHash:      security.TokenDigest(plainToken),
+		EncryptedToken: encryptedToken,
+		Enabled:        true,
+	}
+	if err := tx.Omit("Customer").Create(&token).Error; err != nil {
+		return false, "", mapGormError(err)
+	}
+	return true, plainToken, nil
 }
 
 func legacySubscriptionLinkKey(link LegacySubscriptionLinkInput) string {

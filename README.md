@@ -183,28 +183,28 @@ for static clients, and binds them to the named node. It does not use Xray's
 `flow` values across configs, the command fails because the current data model
 stores flow on the proxy account.
 
-During migration, runtime sync treats a matching unmanaged static Xray user
-with the same UUID and flow as already present, so it does not duplicate-add the
-legacy account. To make a legacy user fully removable by PostgreSQL, remove that
-static client from node config after confirming runtime sync has added the
-managed user.
+After importing the static clients, clear those static users from the node
+`config.json` and restart/reload the Xray container. Runtime sync then adds the
+managed `pcp-*` users from PostgreSQL. From that point on, user add/remove and
+disable behavior is controlled by the control plane instead of node-local JSON.
 
 Existing public subscription files can also be imported. The file remains on
-Caddy for temporary compatibility, but the control plane records the old public
-path as a subscription alias and generates the new content from PostgreSQL:
+Caddy for temporary compatibility. The control plane treats the imported users
+as normal proxy accounts under the legacy customer and serves new managed
+subscriptions through regular `/sub/{token}` URLs:
 
 ```bash
 ./proxy-control-plane import subscription-file \
-  --file .local/imports/legacy-public.txt \
-  --public-path /legacy-public.txt \
-  --alias-name legacy-public
+  --file .local/imports/legacy-public.txt
 ```
 
 The importer accepts raw VLESS URI lists or base64-encoded subscription files.
 It creates or reuses the same legacy customer, imports missing VLESS accounts,
 tries to bind each link to an existing `proxy_nodes` row by public host, port,
-transport, security, path, and Reality fields, and stores the source file SHA256
-for audit. Re-running it is safe.
+transport, security, path, and Reality fields, and creates one subscription
+token if the customer does not already have any. The existing Caddy public file
+is not modified or deleted. Re-running the import is safe; existing tokens are
+kept and cannot be reprinted because only token hashes are stored.
 
 When Ansible enables the runtime API, node sync can also send:
 
@@ -293,11 +293,12 @@ Then edit `.local/app.env`.
 Important variables:
 
 ```env
-PCP_LISTEN_ADDR=:9710
+PCP_LISTEN_ADDR=127.0.0.1:9710
 PCP_DATABASE_URL=postgres://user:password@host:5432/proxy_control?sslmode=require
 PCP_ADMIN_EMAIL=admin@proxy.example
 PCP_ADMIN_PASSWORD=change-this-to-a-long-admin-password
 PCP_SECRET_KEY=change-this-with-openssl-rand-base64-32-before-serving
+PCP_DATABASE_ENCRYPTION_KEY=base64-encoded-32-byte-key
 PCP_AUTO_CREATE_DATABASE=true
 PCP_AUTO_MIGRATE=false
 PCP_RUNTIME_SYNC_ENABLED=false
@@ -308,6 +309,11 @@ PCP_TRAFFIC_SYNC_ENABLED=false
 PCP_TRAFFIC_SYNC_INTERVAL=10m
 PCP_TRAFFIC_SYNC_TIMEOUT=30s
 PCP_TRAFFIC_SYNC_CONCURRENCY=3
+PCP_MAINTENANCE_CLEANUP_ENABLED=false
+PCP_MAINTENANCE_CLEANUP_INTERVAL=24h
+PCP_MAINTENANCE_TRAFFIC_RETENTION=7d
+PCP_MAINTENANCE_TRAFFIC_DAILY_RETENTION=30d
+PCP_MAINTENANCE_AUDIT_RETENTION=90d
 ```
 
 For a remote PostgreSQL server, use `sslmode=require` when the server supports
@@ -319,6 +325,14 @@ intentionally want the server to run GORM `AutoMigrate` before serving.
 The server refuses to start with the example admin email, placeholder admin
 password, placeholder secret key, a password shorter than 12 characters, or a
 secret key shorter than 32 characters.
+
+`PCP_DATABASE_ENCRYPTION_KEY` is optional but recommended. It must be a
+base64-encoded 32-byte key, for example from `openssl rand -base64 32`. When it
+is set, new subscription tokens are still verified by `token_hash`, but the
+plain token is also stored as an AES-256-GCM encrypted database column so a
+future customer app can show the saved subscription URL after login. Existing
+hash-only tokens continue to work, but their plaintext cannot be recovered
+unless they are rotated or recreated.
 
 Runtime sync is disabled by default. Enable `PCP_RUNTIME_SYNC_ENABLED=true`
 after Ansible has registered Xray nodes with runtime API fields. The sync loop
@@ -334,6 +348,15 @@ and user stats policy enabled. The default interval is 10 minutes and the API
 timeout is 30 seconds. The collector uses Xray's reset mode, so each row written
 to `traffic_usage` is the traffic delta since the previous successful stats
 query.
+
+Maintenance cleanup is disabled by default. Enable
+`PCP_MAINTENANCE_CLEANUP_ENABLED=true` if you want the API process itself to
+periodically aggregate old traffic detail and delete old rows. The default
+interval is 24 hours. The retention defaults are:
+
+- `traffic_usage`: 7 days
+- `traffic_usage_daily`: 30 days
+- `audit_logs`: 90 days
 
 Runtime precedence is:
 
@@ -403,7 +426,29 @@ The Docker command reads `.local/app.env` by default and passes it to Compose as
 ```
 
 That means Docker Compose injects environment variables, and the container does
-not try to read `.local/` from inside the image.
+not try to read `.local/` from inside the image. Compose uses
+`restart: unless-stopped`, so Docker restarts the API container after machine
+reboot or unexpected container exit unless you explicitly stop it.
+
+## GitHub Container Registry Release
+
+GitHub Actions publishes container images to GitHub Container Registry only when
+a version tag is pushed. It uses the built-in `GITHUB_TOKEN`, so no Docker Hub
+secret is required.
+
+Then create and push a semver tag:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow builds and pushes:
+
+- `ghcr.io/ziyan-c/proxy-control-plane:0.1.0`
+- `ghcr.io/ziyan-c/proxy-control-plane:0.1`
+- `ghcr.io/ziyan-c/proxy-control-plane:0`
+- `ghcr.io/ziyan-c/proxy-control-plane:latest` for non-prerelease tags
 
 ## CLI Commands
 
@@ -412,7 +457,9 @@ not try to read `.local/` from inside the image.
 ./proxy-control-plane db migrate
 ./proxy-control-plane db automigrate
 ./proxy-control-plane import xray-config --node xray-under-caddy-la-1 --file .local/imports/xray-under-caddy-la-1.json
-./proxy-control-plane import subscription-file --file .local/imports/legacy-public.txt --public-path /legacy-public.txt
+./proxy-control-plane import subscription-file --file .local/imports/legacy-public.txt
+./proxy-control-plane subscription token ensure --customer-email legacy-public@proxy-control-plane.local --name legacy-public --output-file .local/generated/legacy-public-subscription.txt
+./proxy-control-plane subscription token encrypt --token-file .local/generated/legacy-public-subscription.txt
 ./proxy-control-plane maintenance cleanup
 ./proxy-control-plane server serve
 ./proxy-control-plane docker up
@@ -421,18 +468,22 @@ not try to read `.local/` from inside the image.
 Useful flags:
 
 ```bash
-./proxy-control-plane server serve --listen=:9710
+./proxy-control-plane server serve --listen=127.0.0.1:9710
 ./proxy-control-plane server serve --env-file=.local/app.env
 ./proxy-control-plane server serve --database-url='postgres://user:password@host:5432/proxy_control?sslmode=require'
 ./proxy-control-plane server serve --auto-create-database=true --auto-migrate=true
 ./proxy-control-plane server serve --runtime-sync=true --runtime-sync-interval=5m
 ./proxy-control-plane server serve --traffic-sync=true --traffic-sync-interval=10m
+./proxy-control-plane server serve --maintenance-cleanup=true --maintenance-cleanup-interval=24h
 ./proxy-control-plane import xray-config --node xray-under-caddy-la-1 --file .local/imports/xray-under-caddy-la-1.json
 ./proxy-control-plane import xray-config --node xray-fr-1 --file .local/imports/xray-fr-1.json --dry-run
-./proxy-control-plane import subscription-file --file .local/imports/legacy-public.txt --public-path /legacy-public.txt --dry-run
+./proxy-control-plane import subscription-file --file .local/imports/legacy-public.txt --dry-run
+./proxy-control-plane import subscription-file --file .local/imports/legacy-public.txt --create-subscription-token=false
+./proxy-control-plane subscription token ensure --customer-email legacy-public@proxy-control-plane.local --name legacy-public --output-file .local/generated/legacy-public-subscription.txt
+./proxy-control-plane subscription token encrypt --token-file .local/generated/legacy-public-subscription.txt
 ./proxy-control-plane maintenance cleanup --dry-run
 ./proxy-control-plane maintenance cleanup
-./proxy-control-plane maintenance cleanup --traffic-retention=7d --traffic-max-size=1GB --traffic-daily-retention=180d --traffic-daily-max-size=2GB --audit-retention=180d --audit-max-size=1GB
+./proxy-control-plane maintenance cleanup --traffic-retention=7d --traffic-daily-retention=30d --audit-retention=90d
 ./proxy-control-plane db migrate --database-url='postgres://user:password@host:5432/proxy_control?sslmode=require'
 ./proxy-control-plane db migrate --migrations-dir=migrations
 ./proxy-control-plane db automigrate
@@ -450,23 +501,20 @@ location:
 
 Traffic details are intentionally append-only in `traffic_usage` so the project
 can keep precise history while data is fresh. Long-term history is stored in
-`traffic_usage_daily`, one row per account, node, and day. The cleanup defaults
-use both age and size caps:
+`traffic_usage_daily`, one row per account, node, and day. Cleanup is based on
+age retention only:
 
-- `traffic_usage`: 7 days or 1GB, whichever cap is reached first
-- `traffic_usage_daily`: 180 days or 2GB, whichever cap is reached first
-- `audit_logs`: 180 days or 1GB, whichever cap is reached first
+- `traffic_usage`: 7 days
+- `traffic_usage_daily`: 30 days
+- `audit_logs`: 90 days
 
 Run cleanup in dry-run mode first:
 
 ```bash
 ./proxy-control-plane maintenance cleanup \
-  --audit-retention=180d \
-  --audit-max-size=1GB \
+  --audit-retention=90d \
   --traffic-retention=7d \
-  --traffic-max-size=1GB \
-  --traffic-daily-retention=180d \
-  --traffic-daily-max-size=2GB \
+  --traffic-daily-retention=30d \
   --dry-run
 ```
 
@@ -475,20 +523,22 @@ writes to PostgreSQL:
 
 ```bash
 ./proxy-control-plane maintenance cleanup \
-  --audit-retention=180d \
-  --audit-max-size=1GB \
+  --audit-retention=90d \
   --traffic-retention=7d \
-  --traffic-max-size=1GB \
-  --traffic-daily-retention=180d \
-  --traffic-daily-max-size=2GB
+  --traffic-daily-retention=30d
 ```
 
+For normal deployment, you can let the API process run the same cleanup
+periodically by setting `PCP_MAINTENANCE_CLEANUP_ENABLED=true`. Keep the manual
+command for dry-runs, one-off cleanup, and checking a retention change before
+you enable it.
+
 The write path runs in one database transaction. It first aggregates old
-`traffic_usage` rows selected by age or size into `traffic_usage_daily`, then
-deletes those detail rows. It also deletes old `traffic_usage_daily` rows when
-the 180-day age cap or 2GB soft cap is reached, and deletes `audit_logs` when the
-180-day age cap or 1GB soft cap is reached. PostgreSQL may keep physical files
-allocated after deletes; the space is still reusable by future writes.
+`traffic_usage` rows older than the detail retention into `traffic_usage_daily`,
+then deletes those detail rows. It also deletes `traffic_usage_daily` rows older
+than the daily retention and `audit_logs` older than the audit retention.
+PostgreSQL may keep physical files allocated after deletes; the space is still
+reusable by future writes.
 
 ## Main API
 
@@ -533,14 +583,6 @@ Subscription tokens:
 - `PATCH /admin/subscription-tokens/{id}`
 - `POST /admin/subscription-tokens/{id}/rotate`
 
-Subscription aliases:
-
-- `GET /admin/subscription-aliases`
-- `POST /admin/subscription-aliases`
-- `GET /admin/subscription-aliases/{id}`
-- `PATCH /admin/subscription-aliases/{id}`
-- `DELETE /admin/subscription-aliases/{id}`
-
 Traffic:
 
 - `POST /admin/traffic-usage`
@@ -549,10 +591,8 @@ Client subscription:
 
 - `GET /sub/{token}` or `GET /sub/{token}?fmt=base64` returns base64 VLESS subscription content
 - `GET /sub/{token}?fmt=raw` returns raw VLESS URI text
-- `GET /legacy-sub/{old_public_path}` serves a registered legacy public path
 
-All admin endpoints except `/health`, `/admin/login`, `/sub/{token}`, and
-`/legacy-sub/{old_public_path}` require:
+All admin endpoints except `/health`, `/admin/login`, and `/sub/{token}` require:
 
 ```text
 Authorization: Bearer <access_token>
@@ -565,7 +605,6 @@ Authorization: Bearer <access_token>
 - `proxy_accounts`
 - `proxy_account_nodes`
 - `subscription_tokens`
-- `subscription_aliases`
 - `traffic_usage`
 - `traffic_usage_daily`
 - `audit_logs`
@@ -581,11 +620,17 @@ Authorization: Bearer <access_token>
 5. Register nodes through Ansible node sync or create them through the API.
 6. Optionally import existing static Xray clients with
    `./proxy-control-plane import xray-config`.
-7. Create customers, nodes, proxy accounts, account-node bindings, and
+7. Optionally import an existing public subscription file with
+   `./proxy-control-plane import subscription-file`; this creates a normal
+   subscription token for the legacy customer if needed.
+8. For an already-imported legacy customer without a token, run
+   `./proxy-control-plane subscription token ensure --customer-email ... --output-file .local/generated/...`.
+9. Create customers, nodes, proxy accounts, account-node bindings, and
    subscription tokens.
-8. Give clients subscription URLs like `http://host:9710/sub/{token}`.
-9. Periodically run `./proxy-control-plane maintenance cleanup` to aggregate old
-   traffic detail and prune old audit rows.
+10. Give clients subscription URLs like `http://host:9710/sub/{token}`.
+11. Enable `PCP_MAINTENANCE_CLEANUP_ENABLED=true` or periodically run
+   `./proxy-control-plane maintenance cleanup` to aggregate old traffic detail
+   and prune old audit rows.
 
 ## Verification
 

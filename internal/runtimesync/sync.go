@@ -153,7 +153,6 @@ func (s *Syncer) SyncNode(ctx context.Context, node domain.ProxyNode, now time.T
 	targetByEmail := usersByEmail(targetUsers)
 	runtimeManagedUsers := managedUsers(runtimeUsers)
 	runtimeByEmail := usersByEmail(runtimeManagedUsers)
-	addAdoptedLegacyUsers(runtimeByEmail, targetByEmail, runtimeUsers)
 
 	result.TargetHash = UsersHash(targetUsers)
 	result.RuntimeHash = UsersHash(mapUsers(runtimeByEmail))
@@ -217,29 +216,6 @@ func managedUsers(users []domain.RuntimeUser) []domain.RuntimeUser {
 		result = append(result, normalizeUser(user))
 	}
 	return result
-}
-
-func addAdoptedLegacyUsers(runtimeByEmail map[string]domain.RuntimeUser, targetByEmail map[string]domain.RuntimeUser, runtimeUsers []domain.RuntimeUser) {
-	unmanagedByIdentity := make(map[string]domain.RuntimeUser)
-	for _, user := range runtimeUsers {
-		if _, ok := domain.ProxyAccountIDFromRuntimeEmail(user.Email); ok {
-			continue
-		}
-		user = normalizeUser(user)
-		if user.UUID == "" {
-			continue
-		}
-		unmanagedByIdentity[userIdentity(user)] = user
-	}
-
-	for email, targetUser := range targetByEmail {
-		if _, ok := runtimeByEmail[email]; ok {
-			continue
-		}
-		if _, ok := unmanagedByIdentity[userIdentity(targetUser)]; ok {
-			runtimeByEmail[email] = normalizeUser(targetUser)
-		}
-	}
 }
 
 func usersByEmail(users []domain.RuntimeUser) map[string]domain.RuntimeUser {

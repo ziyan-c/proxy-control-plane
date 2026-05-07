@@ -118,16 +118,3 @@ func TestParseLinksCountsUnsupportedURIs(t *testing.T) {
 		t.Fatalf("UnsupportedURIs = %d, want 1", result.UnsupportedURIs)
 	}
 }
-
-func TestCanonicalAliasPath(t *testing.T) {
-	path, err := CanonicalAliasPath("https://example.com/public/vless.txt?x=1")
-	if err != nil {
-		t.Fatalf("CanonicalAliasPath() error = %v", err)
-	}
-	if path != "/public/vless.txt" {
-		t.Fatalf("path = %q, want /public/vless.txt", path)
-	}
-	if _, err := CanonicalAliasPath("/"); err == nil {
-		t.Fatal("CanonicalAliasPath(/) succeeded, want error")
-	}
-}

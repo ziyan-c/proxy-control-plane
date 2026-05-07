@@ -72,7 +72,7 @@ func TestSyncNodeDiffsManagedRuntimeUsers(t *testing.T) {
 	}
 }
 
-func TestSyncNodeAdoptsMatchingLegacyStaticUser(t *testing.T) {
+func TestSyncNodeAddsManagedUserWhenLegacyStaticUserMatches(t *testing.T) {
 	target := runtimeUser("account-legacy", "uuid-legacy", "")
 	store := &fakeStore{
 		targetUsers: []domain.RuntimeUser{target},
@@ -89,10 +89,13 @@ func TestSyncNodeAdoptsMatchingLegacyStaticUser(t *testing.T) {
 		t.Fatalf("SyncNode returned error: %v", err)
 	}
 
-	if !result.Unchanged {
-		t.Fatal("SyncNode should treat matching legacy static user as unchanged")
+	if result.Unchanged {
+		t.Fatal("SyncNode should not treat legacy static user as managed state")
 	}
-	if len(client.added) != 0 || len(client.removed) != 0 {
+	if !reflect.DeepEqual(client.added, []domain.RuntimeUser{target}) {
+		t.Fatalf("added = %#v, want %#v", client.added, []domain.RuntimeUser{target})
+	}
+	if len(client.removed) != 0 {
 		t.Fatalf("unexpected operations: added=%v removed=%v", client.added, client.removed)
 	}
 }

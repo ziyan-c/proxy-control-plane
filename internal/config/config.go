@@ -6,49 +6,63 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ziyan-c/proxy-control-plane/internal/security"
 )
 
 type Config struct {
-	AppName                  string
-	Environment              string
-	ListenAddr               string
-	DatabaseURL              string
-	AdminEmail               string
-	AdminPassword            string
-	SecretKey                string
-	AccessTokenExpireMinutes int
-	AutoCreateDatabase       bool
-	AutoMigrate              bool
-	RuntimeSyncEnabled       bool
-	RuntimeSyncInterval      time.Duration
-	RuntimeSyncTimeout       time.Duration
-	RuntimeSyncConcurrency   int
-	TrafficSyncEnabled       bool
-	TrafficSyncInterval      time.Duration
-	TrafficSyncTimeout       time.Duration
-	TrafficSyncConcurrency   int
+	AppName                          string
+	Environment                      string
+	ListenAddr                       string
+	DatabaseURL                      string
+	AdminEmail                       string
+	AdminPassword                    string
+	SecretKey                        string
+	DatabaseEncryptionKey            string
+	AccessTokenExpireMinutes         int
+	AutoCreateDatabase               bool
+	AutoMigrate                      bool
+	RuntimeSyncEnabled               bool
+	RuntimeSyncInterval              time.Duration
+	RuntimeSyncTimeout               time.Duration
+	RuntimeSyncConcurrency           int
+	TrafficSyncEnabled               bool
+	TrafficSyncInterval              time.Duration
+	TrafficSyncTimeout               time.Duration
+	TrafficSyncConcurrency           int
+	MaintenanceCleanupEnabled        bool
+	MaintenanceCleanupInterval       time.Duration
+	MaintenanceAuditRetention        string
+	MaintenanceTrafficRetention      string
+	MaintenanceTrafficDailyRetention string
 }
 
 func Load() Config {
 	return Config{
-		AppName:                  getEnv("PCP_APP_NAME", "proxy-control-plane"),
-		Environment:              getEnv("PCP_ENVIRONMENT", "local"),
-		ListenAddr:               getEnv("PCP_LISTEN_ADDR", ":9710"),
-		DatabaseURL:              normalizeDatabaseURL(getEnv("PCP_DATABASE_URL", "postgres://proxy_control_app:change-me@127.0.0.1:5432/proxy_control?sslmode=disable")),
-		AdminEmail:               getEnv("PCP_ADMIN_EMAIL", "admin@example.com"),
-		AdminPassword:            getEnv("PCP_ADMIN_PASSWORD", "change-me-admin-password"),
-		SecretKey:                getEnv("PCP_SECRET_KEY", "change-me-with-openssl-rand-base64-32"),
-		AccessTokenExpireMinutes: getEnvInt("PCP_ACCESS_TOKEN_EXPIRE_MINUTES", 60),
-		AutoCreateDatabase:       getEnvBool("PCP_AUTO_CREATE_DATABASE", true),
-		AutoMigrate:              getEnvBool("PCP_AUTO_MIGRATE", false),
-		RuntimeSyncEnabled:       getEnvBool("PCP_RUNTIME_SYNC_ENABLED", false),
-		RuntimeSyncInterval:      getEnvDuration("PCP_RUNTIME_SYNC_INTERVAL", 5*time.Minute),
-		RuntimeSyncTimeout:       getEnvDuration("PCP_RUNTIME_SYNC_TIMEOUT", 30*time.Second),
-		RuntimeSyncConcurrency:   getEnvInt("PCP_RUNTIME_SYNC_CONCURRENCY", 3),
-		TrafficSyncEnabled:       getEnvBool("PCP_TRAFFIC_SYNC_ENABLED", false),
-		TrafficSyncInterval:      getEnvDuration("PCP_TRAFFIC_SYNC_INTERVAL", 10*time.Minute),
-		TrafficSyncTimeout:       getEnvDuration("PCP_TRAFFIC_SYNC_TIMEOUT", 30*time.Second),
-		TrafficSyncConcurrency:   getEnvInt("PCP_TRAFFIC_SYNC_CONCURRENCY", 3),
+		AppName:                          getEnv("PCP_APP_NAME", "proxy-control-plane"),
+		Environment:                      getEnv("PCP_ENVIRONMENT", "local"),
+		ListenAddr:                       getEnv("PCP_LISTEN_ADDR", "127.0.0.1:9710"),
+		DatabaseURL:                      normalizeDatabaseURL(getEnv("PCP_DATABASE_URL", "postgres://proxy_control_app:change-me@127.0.0.1:5432/proxy_control?sslmode=disable")),
+		AdminEmail:                       getEnv("PCP_ADMIN_EMAIL", "admin@example.com"),
+		AdminPassword:                    getEnv("PCP_ADMIN_PASSWORD", "change-me-admin-password"),
+		SecretKey:                        getEnv("PCP_SECRET_KEY", "change-me-with-openssl-rand-base64-32"),
+		DatabaseEncryptionKey:            getEnv("PCP_DATABASE_ENCRYPTION_KEY", ""),
+		AccessTokenExpireMinutes:         getEnvInt("PCP_ACCESS_TOKEN_EXPIRE_MINUTES", 60),
+		AutoCreateDatabase:               getEnvBool("PCP_AUTO_CREATE_DATABASE", true),
+		AutoMigrate:                      getEnvBool("PCP_AUTO_MIGRATE", false),
+		RuntimeSyncEnabled:               getEnvBool("PCP_RUNTIME_SYNC_ENABLED", false),
+		RuntimeSyncInterval:              getEnvDuration("PCP_RUNTIME_SYNC_INTERVAL", 5*time.Minute),
+		RuntimeSyncTimeout:               getEnvDuration("PCP_RUNTIME_SYNC_TIMEOUT", 30*time.Second),
+		RuntimeSyncConcurrency:           getEnvInt("PCP_RUNTIME_SYNC_CONCURRENCY", 3),
+		TrafficSyncEnabled:               getEnvBool("PCP_TRAFFIC_SYNC_ENABLED", false),
+		TrafficSyncInterval:              getEnvDuration("PCP_TRAFFIC_SYNC_INTERVAL", 10*time.Minute),
+		TrafficSyncTimeout:               getEnvDuration("PCP_TRAFFIC_SYNC_TIMEOUT", 30*time.Second),
+		TrafficSyncConcurrency:           getEnvInt("PCP_TRAFFIC_SYNC_CONCURRENCY", 3),
+		MaintenanceCleanupEnabled:        getEnvBool("PCP_MAINTENANCE_CLEANUP_ENABLED", false),
+		MaintenanceCleanupInterval:       getEnvDuration("PCP_MAINTENANCE_CLEANUP_INTERVAL", 24*time.Hour),
+		MaintenanceAuditRetention:        getEnv("PCP_MAINTENANCE_AUDIT_RETENTION", "90d"),
+		MaintenanceTrafficRetention:      getEnv("PCP_MAINTENANCE_TRAFFIC_RETENTION", "7d"),
+		MaintenanceTrafficDailyRetention: getEnv("PCP_MAINTENANCE_TRAFFIC_DAILY_RETENTION", "30d"),
 	}
 }
 
@@ -66,6 +80,11 @@ func (c Config) ValidateServer() error {
 	}
 	if isPlaceholderSecret(c.SecretKey) || len(c.SecretKey) < 32 {
 		problems = append(problems, "PCP_SECRET_KEY must be changed and contain at least 32 characters")
+	}
+	if strings.TrimSpace(c.DatabaseEncryptionKey) != "" {
+		if _, err := security.ParseDatabaseEncryptionKey(c.DatabaseEncryptionKey); err != nil {
+			problems = append(problems, "PCP_DATABASE_ENCRYPTION_KEY "+err.Error())
+		}
 	}
 	if c.AccessTokenExpireMinutes <= 0 {
 		problems = append(problems, "PCP_ACCESS_TOKEN_EXPIRE_MINUTES must be greater than 0")
@@ -91,6 +110,9 @@ func (c Config) ValidateServer() error {
 		if c.TrafficSyncConcurrency <= 0 {
 			problems = append(problems, "PCP_TRAFFIC_SYNC_CONCURRENCY must be greater than 0")
 		}
+	}
+	if c.MaintenanceCleanupEnabled && c.MaintenanceCleanupInterval <= 0 {
+		problems = append(problems, "PCP_MAINTENANCE_CLEANUP_INTERVAL must be greater than 0")
 	}
 	if len(problems) > 0 {
 		return errors.New("invalid server configuration: " + strings.Join(problems, "; "))

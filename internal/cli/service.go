@@ -21,21 +21,26 @@ import (
 )
 
 type serviceOptions struct {
-	envFile                string
-	listenAddr             string
-	databaseURL            string
-	autoCreateDatabase     string
-	autoMigrate            string
-	runtimeSync            string
-	runtimeSyncInterval    string
-	runtimeSyncTimeout     string
-	runtimeSyncConcurrency int
-	trafficSync            string
-	trafficSyncInterval    string
-	trafficSyncTimeout     string
-	trafficSyncConcurrency int
-	migrationsDir          string
-	noLocalConfig          bool
+	envFile                          string
+	listenAddr                       string
+	databaseURL                      string
+	autoCreateDatabase               string
+	autoMigrate                      string
+	runtimeSync                      string
+	runtimeSyncInterval              string
+	runtimeSyncTimeout               string
+	runtimeSyncConcurrency           int
+	trafficSync                      string
+	trafficSyncInterval              string
+	trafficSyncTimeout               string
+	trafficSyncConcurrency           int
+	maintenanceCleanup               string
+	maintenanceCleanupInterval       string
+	maintenanceAuditRetention        string
+	maintenanceTrafficRetention      string
+	maintenanceTrafficDailyRetention string
+	migrationsDir                    string
+	noLocalConfig                    bool
 }
 
 type serviceMode int
@@ -75,6 +80,11 @@ func newServerServeCommand(rootOpts *Options) *cobra.Command {
 	cmd.Flags().StringVar(&opts.trafficSyncInterval, "traffic-sync-interval", "", "interval for Xray traffic stats collection, for example 5m")
 	cmd.Flags().StringVar(&opts.trafficSyncTimeout, "traffic-sync-timeout", "", "timeout per Xray stats API call, for example 30s")
 	cmd.Flags().IntVar(&opts.trafficSyncConcurrency, "traffic-sync-concurrency", 0, "maximum Xray nodes to collect traffic from in parallel")
+	cmd.Flags().StringVar(&opts.maintenanceCleanup, "maintenance-cleanup", "", "true or false; enable periodic database maintenance cleanup")
+	cmd.Flags().StringVar(&opts.maintenanceCleanupInterval, "maintenance-cleanup-interval", "", "interval for maintenance cleanup, for example 24h")
+	cmd.Flags().StringVar(&opts.maintenanceAuditRetention, "maintenance-audit-retention", "", "delete audit logs older than this retention, for example 90d")
+	cmd.Flags().StringVar(&opts.maintenanceTrafficRetention, "maintenance-traffic-retention", "", "aggregate and delete traffic_usage rows older than this retention, for example 7d")
+	cmd.Flags().StringVar(&opts.maintenanceTrafficDailyRetention, "maintenance-traffic-daily-retention", "", "delete traffic_usage_daily rows older than this retention, for example 30d")
 	return cmd
 }
 
@@ -251,6 +261,29 @@ func applyServiceOptions(cfg *config.Config, opts *serviceOptions) error {
 	if opts.trafficSyncConcurrency > 0 {
 		cfg.TrafficSyncConcurrency = opts.trafficSyncConcurrency
 	}
+	if opts.maintenanceCleanup != "" {
+		value, err := strconv.ParseBool(opts.maintenanceCleanup)
+		if err != nil {
+			return fmt.Errorf("--maintenance-cleanup must be true or false: %w", err)
+		}
+		cfg.MaintenanceCleanupEnabled = value
+	}
+	if opts.maintenanceCleanupInterval != "" {
+		value, err := time.ParseDuration(opts.maintenanceCleanupInterval)
+		if err != nil {
+			return fmt.Errorf("--maintenance-cleanup-interval must be a duration such as 24h: %w", err)
+		}
+		cfg.MaintenanceCleanupInterval = value
+	}
+	if opts.maintenanceAuditRetention != "" {
+		cfg.MaintenanceAuditRetention = opts.maintenanceAuditRetention
+	}
+	if opts.maintenanceTrafficRetention != "" {
+		cfg.MaintenanceTrafficRetention = opts.maintenanceTrafficRetention
+	}
+	if opts.maintenanceTrafficDailyRetention != "" {
+		cfg.MaintenanceTrafficDailyRetention = opts.maintenanceTrafficDailyRetention
+	}
 	return nil
 }
 
@@ -292,6 +325,13 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store) error {
 		})
 		go syncer.Run(serveCtx)
 	}
+	if cfg.MaintenanceCleanupEnabled {
+		interval, input, err := maintenanceCleanupInputFromConfig(cfg)
+		if err != nil {
+			return err
+		}
+		go runMaintenanceCleanupLoop(serveCtx, st, interval, input)
+	}
 
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -319,4 +359,61 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store) error {
 		}
 		return err
 	}
+}
+
+func maintenanceCleanupInputFromConfig(cfg config.Config) (time.Duration, store.MaintenanceCleanupInput, error) {
+	auditRetention, err := parseRetentionDuration(cfg.MaintenanceAuditRetention)
+	if err != nil {
+		return 0, store.MaintenanceCleanupInput{}, fmt.Errorf("PCP_MAINTENANCE_AUDIT_RETENTION: %w", err)
+	}
+	trafficRetention, err := parseRetentionDuration(cfg.MaintenanceTrafficRetention)
+	if err != nil {
+		return 0, store.MaintenanceCleanupInput{}, fmt.Errorf("PCP_MAINTENANCE_TRAFFIC_RETENTION: %w", err)
+	}
+	trafficDailyRetention, err := parseRetentionDuration(cfg.MaintenanceTrafficDailyRetention)
+	if err != nil {
+		return 0, store.MaintenanceCleanupInput{}, fmt.Errorf("PCP_MAINTENANCE_TRAFFIC_DAILY_RETENTION: %w", err)
+	}
+	return cfg.MaintenanceCleanupInterval, store.MaintenanceCleanupInput{
+		AuditRetention:        auditRetention,
+		TrafficRetention:      trafficRetention,
+		TrafficDailyRetention: trafficDailyRetention,
+	}, nil
+}
+
+func runMaintenanceCleanupLoop(ctx context.Context, st *store.Store, interval time.Duration, input store.MaintenanceCleanupInput) {
+	log.Printf("maintenance cleanup enabled: interval=%s traffic_retention=%s traffic_daily_retention=%s audit_retention=%s",
+		interval,
+		input.TrafficRetention,
+		input.TrafficDailyRetention,
+		input.AuditRetention,
+	)
+	runMaintenanceCleanupOnce(ctx, st, input)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("maintenance cleanup stopped")
+			return
+		case <-ticker.C:
+			runMaintenanceCleanupOnce(ctx, st, input)
+		}
+	}
+}
+
+func runMaintenanceCleanupOnce(ctx context.Context, st *store.Store, input store.MaintenanceCleanupInput) {
+	result, err := st.MaintenanceCleanup(ctx, input)
+	if err != nil {
+		log.Printf("maintenance cleanup failed: %v", err)
+		return
+	}
+	log.Printf("maintenance cleanup complete: traffic_rows=%d traffic_daily_rows=%d traffic_daily_deleted=%d audit_rows=%d",
+		result.TrafficRowsDeleted,
+		result.TrafficDailyRowsUpserted,
+		result.TrafficDailyRowsDeleted,
+		result.AuditRowsDeleted,
+	)
 }

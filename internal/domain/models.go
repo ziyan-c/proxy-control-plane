@@ -11,9 +11,8 @@ type Customer struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 
-	ProxyAccounts       []ProxyAccount      `json:"-" gorm:"foreignKey:CustomerID;constraint:OnDelete:CASCADE;"`
-	SubscriptionTokens  []SubscriptionToken `json:"-" gorm:"foreignKey:CustomerID;constraint:OnDelete:CASCADE;"`
-	SubscriptionAliases []SubscriptionAlias `json:"-" gorm:"foreignKey:CustomerID;constraint:OnDelete:CASCADE;"`
+	ProxyAccounts      []ProxyAccount      `json:"-" gorm:"foreignKey:CustomerID;constraint:OnDelete:CASCADE;"`
+	SubscriptionTokens []SubscriptionToken `json:"-" gorm:"foreignKey:CustomerID;constraint:OnDelete:CASCADE;"`
 }
 
 type ProxyNode struct {
@@ -70,6 +69,7 @@ type SubscriptionToken struct {
 	CustomerID        string     `json:"customer_id" gorm:"index;not null"`
 	Name              string     `json:"name" gorm:"not null"`
 	TokenHash         string     `json:"-" gorm:"uniqueIndex;not null"`
+	EncryptedToken    string     `json:"-" gorm:"column:encrypted_token"`
 	Enabled           bool       `json:"enabled" gorm:"index;not null"`
 	ExpiresAt         *time.Time `json:"expires_at,omitempty"`
 	CreatedAt         time.Time  `json:"created_at"`
@@ -78,25 +78,6 @@ type SubscriptionToken struct {
 	LastUsedIP        string     `json:"last_used_ip,omitempty"`
 	LastUsedUserAgent string     `json:"last_used_user_agent,omitempty"`
 	PlainToken        string     `json:"plain_token,omitempty" gorm:"-"`
-
-	Customer Customer `json:"-" gorm:"foreignKey:CustomerID;constraint:OnDelete:CASCADE;"`
-}
-
-type SubscriptionAlias struct {
-	ID                string     `json:"id" gorm:"primaryKey;type:text"`
-	CustomerID        string     `json:"customer_id" gorm:"index;not null"`
-	Name              string     `json:"name" gorm:"not null"`
-	Path              string     `json:"path" gorm:"uniqueIndex;not null"`
-	PathHash          string     `json:"-" gorm:"uniqueIndex;not null"`
-	Enabled           bool       `json:"enabled" gorm:"index;not null"`
-	ExpiresAt         *time.Time `json:"expires_at,omitempty"`
-	SourcePath        string     `json:"source_path,omitempty"`
-	SourceSHA256      string     `json:"source_sha256,omitempty"`
-	CreatedAt         time.Time  `json:"created_at"`
-	UpdatedAt         time.Time  `json:"updated_at"`
-	LastUsedAt        *time.Time `json:"last_used_at,omitempty"`
-	LastUsedIP        string     `json:"last_used_ip,omitempty"`
-	LastUsedUserAgent string     `json:"last_used_user_agent,omitempty"`
 
 	Customer Customer `json:"-" gorm:"foreignKey:CustomerID;constraint:OnDelete:CASCADE;"`
 }

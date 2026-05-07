@@ -159,7 +159,7 @@ func (s *Store) CreateCustomer(ctx context.Context, customer domain.Customer) (d
 	if customer.Status == "" {
 		customer.Status = "active"
 	}
-	if err := s.db.WithContext(ctx).Omit("ProxyAccounts", "SubscriptionTokens", "SubscriptionAliases").Create(&customer).Error; err != nil {
+	if err := s.db.WithContext(ctx).Omit("ProxyAccounts", "SubscriptionTokens").Create(&customer).Error; err != nil {
 		return domain.Customer{}, mapGormError(err)
 	}
 	return customer, nil
@@ -180,11 +180,20 @@ func (s *Store) GetCustomer(ctx context.Context, id string) (domain.Customer, er
 	return customer, nil
 }
 
+func (s *Store) GetCustomerByEmail(ctx context.Context, email string) (domain.Customer, error) {
+	var customer domain.Customer
+	err := s.db.WithContext(ctx).First(&customer, "email = ?", email).Error
+	if err != nil {
+		return domain.Customer{}, mapGormError(err)
+	}
+	return customer, nil
+}
+
 func (s *Store) UpdateCustomer(ctx context.Context, customer domain.Customer) (domain.Customer, error) {
 	if _, err := s.GetCustomer(ctx, customer.ID); err != nil {
 		return domain.Customer{}, err
 	}
-	if err := s.db.WithContext(ctx).Omit("ProxyAccounts", "SubscriptionTokens", "SubscriptionAliases").Save(&customer).Error; err != nil {
+	if err := s.db.WithContext(ctx).Omit("ProxyAccounts", "SubscriptionTokens").Save(&customer).Error; err != nil {
 		return domain.Customer{}, mapGormError(err)
 	}
 	return s.GetCustomer(ctx, customer.ID)
@@ -514,11 +523,12 @@ func (s *Store) UpdateSubscriptionToken(ctx context.Context, token domain.Subscr
 	return s.GetSubscriptionToken(ctx, token.ID)
 }
 
-func (s *Store) RotateSubscriptionToken(ctx context.Context, id string, tokenHash string) (domain.SubscriptionToken, error) {
+func (s *Store) RotateSubscriptionToken(ctx context.Context, id string, tokenHash string, encryptedToken string) (domain.SubscriptionToken, error) {
 	result := s.db.WithContext(ctx).Model(&domain.SubscriptionToken{}).
 		Where("id = ?", id).
 		Updates(map[string]any{
 			"token_hash":           tokenHash,
+			"encrypted_token":      encryptedToken,
 			"last_used_at":         nil,
 			"last_used_ip":         "",
 			"last_used_user_agent": "",

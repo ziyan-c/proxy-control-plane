@@ -1,6 +1,8 @@
 package security
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -16,6 +18,8 @@ import (
 )
 
 const defaultPBKDF2Iterations = 260_000
+const databaseEncryptionKeyBytes = 32
+const encryptedStringVersion = "v1"
 
 func NewID() (string, error) {
 	var b [16]byte
@@ -44,6 +48,99 @@ func NewRandomToken() (string, error) {
 func TokenDigest(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
+}
+
+func ParseDatabaseEncryptionKey(value string) ([]byte, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	key, err := base64.StdEncoding.DecodeString(value)
+	if err != nil {
+		return nil, fmt.Errorf("database encryption key must be base64: %w", err)
+	}
+	if len(key) != databaseEncryptionKeyBytes {
+		return nil, fmt.Errorf("database encryption key must decode to %d bytes", databaseEncryptionKeyBytes)
+	}
+	return key, nil
+}
+
+func EncryptStringWithBase64Key(encodedKey string, plaintext string) (string, error) {
+	key, err := ParseDatabaseEncryptionKey(encodedKey)
+	if err != nil {
+		return "", err
+	}
+	if len(key) == 0 {
+		return "", nil
+	}
+	return EncryptString(key, plaintext)
+}
+
+func DecryptStringWithBase64Key(encodedKey string, encrypted string) (string, error) {
+	key, err := ParseDatabaseEncryptionKey(encodedKey)
+	if err != nil {
+		return "", err
+	}
+	if len(key) == 0 {
+		return "", fmt.Errorf("database encryption key is required")
+	}
+	return DecryptString(key, encrypted)
+}
+
+func EncryptString(key []byte, plaintext string) (string, error) {
+	if len(key) != databaseEncryptionKeyBytes {
+		return "", fmt.Errorf("database encryption key must be %d bytes", databaseEncryptionKeyBytes)
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	ciphertext := aead.Seal(nil, nonce, []byte(plaintext), nil)
+	return encryptedStringVersion + ":" +
+		base64.RawURLEncoding.EncodeToString(nonce) + ":" +
+		base64.RawURLEncoding.EncodeToString(ciphertext), nil
+}
+
+func DecryptString(key []byte, encrypted string) (string, error) {
+	if len(key) != databaseEncryptionKeyBytes {
+		return "", fmt.Errorf("database encryption key must be %d bytes", databaseEncryptionKeyBytes)
+	}
+	parts := strings.Split(encrypted, ":")
+	if len(parts) != 3 || parts[0] != encryptedStringVersion {
+		return "", fmt.Errorf("unsupported encrypted string format")
+	}
+	nonce, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", fmt.Errorf("decode encrypted string nonce: %w", err)
+	}
+	ciphertext, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return "", fmt.Errorf("decode encrypted string ciphertext: %w", err)
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	if len(nonce) != aead.NonceSize() {
+		return "", fmt.Errorf("encrypted string nonce has invalid length")
+	}
+	plaintext, err := aead.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return "", err
+	}
+	return string(plaintext), nil
 }
 
 func PasswordHash(password string) (string, error) {

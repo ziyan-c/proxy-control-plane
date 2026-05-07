@@ -124,11 +124,6 @@ func TestRedactLogPath(t *testing.T) {
 			want: "/sub/<redacted>?fmt=raw",
 		},
 		{
-			name: "legacy subscription path",
-			path: "/legacy-sub/v2ray/PUBLIC-29451172-2d7b-48e7-a43f-35e5b1e0199a",
-			want: "/legacy-sub/<redacted>",
-		},
-		{
 			name: "admin path",
 			path: "/admin/customers",
 			want: "/admin/customers",

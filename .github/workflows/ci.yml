@@ -9,6 +9,23 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      PCP_CI_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/proxy_control_plane_ci?sslmode=disable
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -22,5 +39,46 @@ jobs:
       - name: Check formatting
         run: test -z "$(gofmt -l ./cmd ./internal)"
 
+      - name: Run vet
+        run: go vet ./...
+
       - name: Run tests
         run: go test ./...
+
+      - name: Build CLI
+        run: go build -o dist/proxy-control-plane ./cmd/proxy-control-plane
+
+      - name: Run SQL migrations
+        run: ./dist/proxy-control-plane db migrate --no-local-config --database-url "$PCP_CI_DATABASE_URL" --auto-create-database=true
+
+      - name: Smoke test API
+        env:
+          PCP_APP_NAME: proxy-control-plane
+          PCP_ENVIRONMENT: ci
+          PCP_LISTEN_ADDR: 127.0.0.1:9710
+          PCP_DATABASE_URL: ${{ env.PCP_CI_DATABASE_URL }}
+          PCP_ADMIN_EMAIL: ci-admin@example.test
+          PCP_ADMIN_PASSWORD: ci-admin-password-for-tests
+          PCP_SECRET_KEY: ci-secret-key-for-tests-that-is-long-enough
+          PCP_ACCESS_TOKEN_EXPIRE_MINUTES: 15
+          PCP_AUTO_CREATE_DATABASE: "true"
+          PCP_AUTO_MIGRATE: "false"
+          PCP_RUNTIME_SYNC_ENABLED: "false"
+          PCP_TRAFFIC_SYNC_ENABLED: "false"
+          PCP_MAINTENANCE_CLEANUP_ENABLED: "false"
+        run: |
+          ./dist/proxy-control-plane server serve --no-local-config &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:9710/health; then
+              exit 0
+            fi
+            sleep 1
+          done
+
+          exit 1
+
+      - name: Build Docker image
+        run: docker build -t proxy-control-plane:ci .

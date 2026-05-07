@@ -20,5 +20,6 @@ COPY migrations ./migrations
 
 USER app
 EXPOSE 9710
+ENV PCP_LISTEN_ADDR=0.0.0.0:9710
 
 CMD ["/app/proxy-control-plane", "server", "serve", "--no-local-config"]

@@ -2,8 +2,6 @@ package cli
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"strings"
@@ -27,12 +25,11 @@ type importXrayConfigOptions struct {
 
 type importSubscriptionFileOptions struct {
 	file                string
-	publicPath          string
-	aliasName           string
-	sourcePath          string
 	customerEmail       string
 	customerDisplayName string
 	emailTagPrefix      string
+	createToken         bool
+	tokenName           string
 	dryRun              bool
 }
 
@@ -81,23 +78,24 @@ func newImportSubscriptionFileCommand(rootOpts *Options) *cobra.Command {
 		customerEmail:       "legacy-public@proxy-control-plane.local",
 		customerDisplayName: "Legacy public accounts",
 		emailTagPrefix:      "legacy-public",
+		createToken:         true,
+		tokenName:           "legacy-public",
 	}
 
 	cmd := &cobra.Command{
 		Use:   "subscription-file",
-		Short: "Import a legacy public VLESS subscription file and register its compatibility path",
+		Short: "Import a legacy public VLESS subscription file as a managed customer",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runImportSubscriptionFile(cmd, rootOpts, serviceOpts, importOpts)
 		},
 	}
 	addServiceFlags(cmd, serviceOpts)
 	cmd.Flags().StringVar(&importOpts.file, "file", "", "local legacy public subscription file to import")
-	cmd.Flags().StringVar(&importOpts.publicPath, "public-path", "", "original public URL path on Caddy, for example /public/vless.txt")
-	cmd.Flags().StringVar(&importOpts.aliasName, "alias-name", "", "display name for the compatibility subscription path")
-	cmd.Flags().StringVar(&importOpts.sourcePath, "source-path", "", "source path label to store; defaults to --file")
 	cmd.Flags().StringVar(&importOpts.customerEmail, "customer-email", importOpts.customerEmail, "legacy customer email to create or reuse")
 	cmd.Flags().StringVar(&importOpts.customerDisplayName, "customer-name", importOpts.customerDisplayName, "legacy customer display name")
 	cmd.Flags().StringVar(&importOpts.emailTagPrefix, "email-tag-prefix", importOpts.emailTagPrefix, "email_tag prefix for imported proxy accounts")
+	cmd.Flags().BoolVar(&importOpts.createToken, "create-subscription-token", importOpts.createToken, "create a normal /sub token if this customer has no subscription tokens")
+	cmd.Flags().StringVar(&importOpts.tokenName, "subscription-token-name", importOpts.tokenName, "name for the generated subscription token")
 	cmd.Flags().BoolVar(&importOpts.dryRun, "dry-run", false, "parse the file and print counts without writing PostgreSQL")
 	return cmd
 }
@@ -174,17 +172,12 @@ func runImportXrayConfig(cmd *cobra.Command, rootOpts *Options, serviceOpts *ser
 
 func runImportSubscriptionFile(cmd *cobra.Command, rootOpts *Options, serviceOpts *serviceOptions, importOpts *importSubscriptionFileOptions) error {
 	importOpts.file = strings.TrimSpace(importOpts.file)
-	importOpts.publicPath = strings.TrimSpace(importOpts.publicPath)
-	importOpts.aliasName = strings.TrimSpace(importOpts.aliasName)
-	importOpts.sourcePath = strings.TrimSpace(importOpts.sourcePath)
 	importOpts.customerEmail = strings.TrimSpace(importOpts.customerEmail)
 	importOpts.customerDisplayName = strings.TrimSpace(importOpts.customerDisplayName)
 	importOpts.emailTagPrefix = strings.TrimSpace(importOpts.emailTagPrefix)
+	importOpts.tokenName = strings.TrimSpace(importOpts.tokenName)
 	if importOpts.file == "" {
 		return fmt.Errorf("--file is required")
-	}
-	if importOpts.publicPath == "" {
-		return fmt.Errorf("--public-path is required")
 	}
 	if importOpts.customerEmail == "" {
 		return fmt.Errorf("--customer-email is required")
@@ -192,8 +185,8 @@ func runImportSubscriptionFile(cmd *cobra.Command, rootOpts *Options, serviceOpt
 	if importOpts.emailTagPrefix == "" {
 		importOpts.emailTagPrefix = "legacy-public"
 	}
-	if importOpts.sourcePath == "" {
-		importOpts.sourcePath = importOpts.file
+	if importOpts.tokenName == "" {
+		importOpts.tokenName = "legacy-public"
 	}
 
 	data, err := os.ReadFile(importOpts.file)
@@ -226,49 +219,47 @@ func runImportSubscriptionFile(cmd *cobra.Command, rootOpts *Options, serviceOpt
 		})
 	}
 
-	sourceHash := sha256.Sum256(data)
-	sourceSHA := hex.EncodeToString(sourceHash[:])
-	fmt.Fprintf(os.Stderr, "parsed %d VLESS link(s) from %s for legacy path %s\n", len(inputLinks), importOpts.file, importOpts.publicPath)
+	fmt.Fprintf(os.Stderr, "parsed %d VLESS link(s) from %s for legacy customer %s\n", len(inputLinks), importOpts.file, importOpts.customerEmail)
 	if parsed.UnsupportedURIs > 0 {
 		fmt.Fprintf(os.Stderr, "warning: skipped %d unsupported non-VLESS subscription URI(s)\n", parsed.UnsupportedURIs)
 	}
 	if importOpts.dryRun {
-		fmt.Fprintf(os.Stderr, "source_sha256=%s\n", sourceSHA)
 		fmt.Fprintln(os.Stderr, "dry run: no database changes")
 		return nil
 	}
 
 	ctx := cmd.Context()
-	st, err := openStoreForCLI(ctx, cmd, rootOpts, serviceOpts)
+	st, cfg, err := openStoreAndConfigForCLI(ctx, cmd, rootOpts, serviceOpts)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
 
 	result, err := st.ImportLegacySubscriptionFile(ctx, store.LegacySubscriptionFileImport{
-		CustomerEmail:       importOpts.customerEmail,
-		CustomerDisplayName: importOpts.customerDisplayName,
-		PublicPath:          importOpts.publicPath,
-		AliasName:           importOpts.aliasName,
-		SourcePath:          importOpts.sourcePath,
-		SourceSHA256:        sourceSHA,
-		EmailTagPrefix:      importOpts.emailTagPrefix,
-		Links:               inputLinks,
+		CustomerEmail:         importOpts.customerEmail,
+		CustomerDisplayName:   importOpts.customerDisplayName,
+		EmailTagPrefix:        importOpts.emailTagPrefix,
+		SubscriptionToken:     importOpts.createToken,
+		SubscriptionTokenName: importOpts.tokenName,
+		DatabaseEncryptionKey: cfg.DatabaseEncryptionKey,
+		Links:                 inputLinks,
 	})
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr,
-		"import complete: customer_created=%d alias_created=%d alias_updated=%d account_created=%d account_existing=%d node_bindings_created=%d unmatched_links=%d skipped=%d\n",
+		"import complete: customer_created=%d subscription_token_created=%d account_created=%d account_existing=%d node_bindings_created=%d unmatched_links=%d skipped=%d\n",
 		result.CustomerCreated,
-		result.AliasCreated,
-		result.AliasUpdated,
+		result.SubscriptionTokenCreated,
 		result.AccountCreated,
 		result.AccountExisting,
 		result.NodeBindings,
 		result.UnmatchedLinks,
 		result.Skipped,
 	)
+	if result.PlainSubscriptionToken != "" {
+		fmt.Fprintf(os.Stderr, "subscription token created: /sub/%s\n", result.PlainSubscriptionToken)
+	}
 	if result.UnmatchedLinks > 0 {
 		fmt.Fprintln(os.Stderr, "warning: some VLESS links did not match existing proxy_nodes; register nodes first, then rerun this import")
 	}
@@ -276,10 +267,15 @@ func runImportSubscriptionFile(cmd *cobra.Command, rootOpts *Options, serviceOpt
 }
 
 func openStoreForCLI(ctx context.Context, cmd *cobra.Command, rootOpts *Options, opts *serviceOptions) (*store.Store, error) {
+	st, _, err := openStoreAndConfigForCLI(ctx, cmd, rootOpts, opts)
+	return st, err
+}
+
+func openStoreAndConfigForCLI(ctx context.Context, cmd *cobra.Command, rootOpts *Options, opts *serviceOptions) (*store.Store, config.Config, error) {
 	if !opts.noLocalConfig || opts.envFile != "" {
 		if !opts.noLocalConfig {
 			if err := initLocal(rootOpts.ConfigDir, effectiveExampleDir(cmd, rootOpts)); err != nil {
-				return nil, err
+				return nil, config.Config{}, err
 			}
 		}
 
@@ -288,15 +284,19 @@ func openStoreForCLI(ctx context.Context, cmd *cobra.Command, rootOpts *Options,
 			envFile = appEnvFile(rootOpts.ConfigDir)
 		}
 		if err := loadEnvFile(envFile, true); err != nil {
-			return nil, err
+			return nil, config.Config{}, err
 		}
 	}
 
 	cfg := config.Load()
 	if err := applyServiceOptions(&cfg, opts); err != nil {
-		return nil, err
+		return nil, config.Config{}, err
 	}
-	return store.Open(ctx, cfg.DatabaseURL, cfg.AutoCreateDatabase)
+	st, err := store.Open(ctx, cfg.DatabaseURL, cfg.AutoCreateDatabase)
+	if err != nil {
+		return nil, config.Config{}, err
+	}
+	return st, cfg, nil
 }
 
 func shortImportValue(value string) string {

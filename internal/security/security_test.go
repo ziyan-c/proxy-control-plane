@@ -48,3 +48,27 @@ func TestTokenDigest(t *testing.T) {
 		t.Fatal("digest is not stable")
 	}
 }
+
+func TestEncryptStringWithBase64KeyRoundTrip(t *testing.T) {
+	key := "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+	encrypted, err := EncryptStringWithBase64Key(key, "secret-token")
+	if err != nil {
+		t.Fatalf("EncryptStringWithBase64Key() error = %v", err)
+	}
+	if encrypted == "" || encrypted == "secret-token" {
+		t.Fatalf("encrypted value = %q, want non-empty ciphertext", encrypted)
+	}
+	decrypted, err := DecryptStringWithBase64Key(key, encrypted)
+	if err != nil {
+		t.Fatalf("DecryptStringWithBase64Key() error = %v", err)
+	}
+	if decrypted != "secret-token" {
+		t.Fatalf("decrypted = %q, want secret-token", decrypted)
+	}
+}
+
+func TestParseDatabaseEncryptionKeyRejectsInvalidLength(t *testing.T) {
+	if _, err := ParseDatabaseEncryptionKey("c2hvcnQ="); err == nil {
+		t.Fatal("ParseDatabaseEncryptionKey accepted short key")
+	}
+}
