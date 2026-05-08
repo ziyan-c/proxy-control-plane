@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -67,6 +69,9 @@ func (s *Server) routes(router *gin.Engine) {
 	admin.POST("/subscription-tokens/:id/rotate", s.rotateSubscriptionToken)
 
 	admin.POST("/traffic-usage", s.recordTrafficUsage)
+	admin.GET("/domain-access-logs", s.listDomainAccessLogs)
+	admin.POST("/domain-access-logs", s.recordDomainAccessLogs)
+	admin.GET("/domain-access-summary", s.summarizeDomainAccessLogs)
 }
 
 func redactingGinLogFormatter(param gin.LogFormatterParams) string {
@@ -696,8 +701,10 @@ func (s *Server) rotateSubscriptionToken(c *gin.Context) {
 type trafficUsageRequest struct {
 	ProxyAccountID string    `json:"proxy_account_id"`
 	ProxyNodeID    string    `json:"proxy_node_id"`
-	UploadBytes    int64     `json:"upload_bytes"`
-	DownloadBytes  int64     `json:"download_bytes"`
+	UploadBytes    *int64    `json:"upload_bytes"`
+	DownloadBytes  *int64    `json:"download_bytes"`
+	UploadGB       *float64  `json:"upload_gb"`
+	DownloadGB     *float64  `json:"download_gb"`
 	RecordedAt     time.Time `json:"recorded_at"`
 }
 
@@ -710,15 +717,21 @@ func (s *Server) recordTrafficUsage(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "proxy_account_id and proxy_node_id are required")
 		return
 	}
-	if req.UploadBytes < 0 || req.DownloadBytes < 0 {
-		writeError(c, http.StatusBadRequest, "traffic bytes cannot be negative")
+	uploadBytes, err := bytesFromTrafficUnits(req.UploadBytes, req.UploadGB, "upload")
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	downloadBytes, err := bytesFromTrafficUnits(req.DownloadBytes, req.DownloadGB, "download")
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
 		return
 	}
 	usage, err := s.store.RecordTrafficUsage(c.Request.Context(), domain.TrafficUsage{
 		ProxyAccountID: req.ProxyAccountID,
 		ProxyNodeID:    req.ProxyNodeID,
-		UploadBytes:    req.UploadBytes,
-		DownloadBytes:  req.DownloadBytes,
+		UploadBytes:    uploadBytes,
+		DownloadBytes:  downloadBytes,
 		RecordedAt:     req.RecordedAt,
 	})
 	if handleStoreError(c, err) {
@@ -726,6 +739,170 @@ func (s *Server) recordTrafficUsage(c *gin.Context) {
 	}
 	s.audit(c, "traffic_usage.recorded", usage.ID)
 	c.JSON(http.StatusCreated, usage)
+}
+
+type domainAccessLogBatchRequest struct {
+	Events []domainAccessLogEventRequest `json:"events"`
+
+	ProxyAccountID string    `json:"proxy_account_id"`
+	ProxyNodeID    string    `json:"proxy_node_id"`
+	Domain         string    `json:"domain"`
+	EventCount     int64     `json:"event_count"`
+	UploadBytes    *int64    `json:"upload_bytes"`
+	DownloadBytes  *int64    `json:"download_bytes"`
+	UploadGB       *float64  `json:"upload_gb"`
+	DownloadGB     *float64  `json:"download_gb"`
+	AccessedAt     time.Time `json:"accessed_at"`
+}
+
+type domainAccessLogEventRequest struct {
+	ProxyAccountID string    `json:"proxy_account_id"`
+	ProxyNodeID    string    `json:"proxy_node_id"`
+	Domain         string    `json:"domain"`
+	EventCount     int64     `json:"event_count"`
+	UploadBytes    *int64    `json:"upload_bytes"`
+	DownloadBytes  *int64    `json:"download_bytes"`
+	UploadGB       *float64  `json:"upload_gb"`
+	DownloadGB     *float64  `json:"download_gb"`
+	AccessedAt     time.Time `json:"accessed_at"`
+}
+
+func (s *Server) recordDomainAccessLogs(c *gin.Context) {
+	var req domainAccessLogBatchRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	events := req.Events
+	if len(events) == 0 {
+		events = []domainAccessLogEventRequest{{
+			ProxyAccountID: req.ProxyAccountID,
+			ProxyNodeID:    req.ProxyNodeID,
+			Domain:         req.Domain,
+			EventCount:     req.EventCount,
+			UploadBytes:    req.UploadBytes,
+			DownloadBytes:  req.DownloadBytes,
+			UploadGB:       req.UploadGB,
+			DownloadGB:     req.DownloadGB,
+			AccessedAt:     req.AccessedAt,
+		}}
+	}
+	logs := make([]domain.DomainAccessLog, 0, len(events))
+	for _, event := range events {
+		log, ok := domainAccessLogFromRequest(c, event)
+		if !ok {
+			return
+		}
+		logs = append(logs, log)
+	}
+	inserted, err := s.store.RecordDomainAccessLogs(c.Request.Context(), logs)
+	if handleStoreError(c, err) {
+		return
+	}
+	s.audit(c, "domain_access_logs.recorded", gin.H{"rows": inserted})
+	c.JSON(http.StatusCreated, gin.H{"inserted": inserted})
+}
+
+func domainAccessLogFromRequest(c *gin.Context, req domainAccessLogEventRequest) (domain.DomainAccessLog, bool) {
+	if req.ProxyAccountID == "" || req.ProxyNodeID == "" {
+		writeError(c, http.StatusBadRequest, "proxy_account_id and proxy_node_id are required")
+		return domain.DomainAccessLog{}, false
+	}
+	domainName, ok := normalizeAccessDomain(req.Domain)
+	if !ok {
+		writeError(c, http.StatusBadRequest, "domain must be a hostname without path, query, or credentials")
+		return domain.DomainAccessLog{}, false
+	}
+	eventCount := req.EventCount
+	if eventCount == 0 {
+		eventCount = 1
+	}
+	if eventCount < 0 {
+		writeError(c, http.StatusBadRequest, "event_count cannot be negative")
+		return domain.DomainAccessLog{}, false
+	}
+	uploadBytes, err := bytesFromTrafficUnits(req.UploadBytes, req.UploadGB, "upload")
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return domain.DomainAccessLog{}, false
+	}
+	downloadBytes, err := bytesFromTrafficUnits(req.DownloadBytes, req.DownloadGB, "download")
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return domain.DomainAccessLog{}, false
+	}
+	return domain.DomainAccessLog{
+		ProxyAccountID: req.ProxyAccountID,
+		ProxyNodeID:    req.ProxyNodeID,
+		Domain:         domainName,
+		EventCount:     eventCount,
+		UploadBytes:    uploadBytes,
+		DownloadBytes:  downloadBytes,
+		AccessedAt:     req.AccessedAt,
+	}, true
+}
+
+func (s *Server) listDomainAccessLogs(c *gin.Context) {
+	filter, ok := domainAccessLogFilterFromQuery(c)
+	if !ok {
+		return
+	}
+	logs, err := s.store.ListDomainAccessLogs(c.Request.Context(), filter)
+	if handleStoreError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, logs)
+}
+
+func (s *Server) summarizeDomainAccessLogs(c *gin.Context) {
+	filter, ok := domainAccessLogFilterFromQuery(c)
+	if !ok {
+		return
+	}
+	rows, err := s.store.SummarizeDomainAccessLogs(c.Request.Context(), filter)
+	if handleStoreError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, rows)
+}
+
+func domainAccessLogFilterFromQuery(c *gin.Context) (store.DomainAccessLogFilter, bool) {
+	filter := store.DomainAccessLogFilter{
+		ProxyAccountID: strings.TrimSpace(c.Query("proxy_account_id")),
+		ProxyNodeID:    strings.TrimSpace(c.Query("proxy_node_id")),
+	}
+	if domainParam := strings.TrimSpace(c.Query("domain")); domainParam != "" {
+		normalized, ok := normalizeAccessDomain(domainParam)
+		if !ok {
+			writeError(c, http.StatusBadRequest, "domain must be a hostname without path, query, or credentials")
+			return store.DomainAccessLogFilter{}, false
+		}
+		filter.Domain = normalized
+	}
+	if sinceParam := strings.TrimSpace(c.Query("since")); sinceParam != "" {
+		value, err := time.Parse(time.RFC3339, sinceParam)
+		if err != nil {
+			writeError(c, http.StatusBadRequest, "since must be RFC3339")
+			return store.DomainAccessLogFilter{}, false
+		}
+		filter.Since = &value
+	}
+	if untilParam := strings.TrimSpace(c.Query("until")); untilParam != "" {
+		value, err := time.Parse(time.RFC3339, untilParam)
+		if err != nil {
+			writeError(c, http.StatusBadRequest, "until must be RFC3339")
+			return store.DomainAccessLogFilter{}, false
+		}
+		filter.Until = &value
+	}
+	if limitParam := strings.TrimSpace(c.Query("limit")); limitParam != "" {
+		value, err := strconv.Atoi(limitParam)
+		if err != nil || value <= 0 {
+			writeError(c, http.StatusBadRequest, "limit must be a positive integer")
+			return store.DomainAccessLogFilter{}, false
+		}
+		filter.Limit = value
+	}
+	return filter, true
 }
 
 func (s *Server) getSubscription(c *gin.Context) {
@@ -889,6 +1066,54 @@ func bindJSONFields(c *gin.Context) (map[string]json.RawMessage, bool) {
 
 func writeError(c *gin.Context, status int, message string) {
 	c.JSON(status, gin.H{"error": message})
+}
+
+func bytesFromTrafficUnits(byteValue *int64, gbValue *float64, direction string) (int64, error) {
+	if byteValue != nil && gbValue != nil {
+		return 0, fmt.Errorf("%s_bytes and %s_gb cannot both be set", direction, direction)
+	}
+	if byteValue != nil {
+		if *byteValue < 0 {
+			return 0, fmt.Errorf("%s_bytes cannot be negative", direction)
+		}
+		return *byteValue, nil
+	}
+	if gbValue == nil {
+		return 0, nil
+	}
+	if math.IsNaN(*gbValue) || math.IsInf(*gbValue, 0) {
+		return 0, fmt.Errorf("%s_gb must be finite", direction)
+	}
+	if *gbValue < 0 {
+		return 0, fmt.Errorf("%s_gb cannot be negative", direction)
+	}
+	const bytesPerGB = float64(1000 * 1000 * 1000)
+	const maxInt64 = float64(1<<63 - 1)
+	if *gbValue > maxInt64/bytesPerGB {
+		return 0, fmt.Errorf("%s_gb is too large", direction)
+	}
+	return int64(math.Round(*gbValue * bytesPerGB)), nil
+}
+
+func normalizeAccessDomain(value string) (string, bool) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return "", false
+	}
+	if strings.Contains(value, "://") {
+		return "", false
+	}
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		value = strings.ToLower(strings.TrimSpace(host))
+	}
+	value = strings.TrimSuffix(value, ".")
+	if value == "" || len(value) > 253 {
+		return "", false
+	}
+	if strings.ContainsAny(value, " \t\r\n:/?#@*") {
+		return "", false
+	}
+	return value, true
 }
 
 func handleStoreError(c *gin.Context, err error) bool {

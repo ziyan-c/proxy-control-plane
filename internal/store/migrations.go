@@ -39,6 +39,7 @@ func (s *Store) AutoMigrate(ctx context.Context) error {
 		&domain.SubscriptionToken{},
 		&domain.TrafficUsage{},
 		&domain.TrafficUsageDaily{},
+		&domain.DomainAccessLog{},
 		&domain.AuditLog{},
 	)
 }

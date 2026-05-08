@@ -139,6 +139,39 @@ func TestRedactLogPath(t *testing.T) {
 	}
 }
 
+func TestBytesFromTrafficUnitsAcceptsGB(t *testing.T) {
+	gb := 1.25
+	bytes, err := bytesFromTrafficUnits(nil, &gb, "upload")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes != 1250*1000*1000 {
+		t.Fatalf("bytes = %d, want %d", bytes, int64(1250*1000*1000))
+	}
+}
+
+func TestBytesFromTrafficUnitsRejectsMixedUnits(t *testing.T) {
+	bytesValue := int64(1)
+	gb := 1.0
+	if _, err := bytesFromTrafficUnits(&bytesValue, &gb, "upload"); err == nil {
+		t.Fatal("bytesFromTrafficUnits accepted mixed byte and GB fields")
+	}
+}
+
+func TestNormalizeAccessDomain(t *testing.T) {
+	got, ok := normalizeAccessDomain("Example.COM:443")
+	if !ok {
+		t.Fatal("normalizeAccessDomain rejected host:port")
+	}
+	if got != "example.com" {
+		t.Fatalf("domain = %q, want example.com", got)
+	}
+
+	if _, ok := normalizeAccessDomain("https://example.com/path"); ok {
+		t.Fatal("normalizeAccessDomain accepted URL with path")
+	}
+}
+
 func patchContext(body string) (*gin.Context, *httptest.ResponseRecorder) {
 	return requestContext(http.MethodPatch, body)
 }

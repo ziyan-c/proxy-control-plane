@@ -238,6 +238,15 @@ counters such as
 them, and writes the returned deltas to `traffic_usage`. This project does not
 target VMess; managed runtime users and generated subscriptions are VLESS.
 
+PostgreSQL keeps exact byte counters, while API JSON responses also include
+decimal GB helper fields: `upload_gb`, `download_gb`, and `total_gb`.
+
+Domain access analytics are separate from Xray `StatsService`. StatsService only
+provides counters, not visited hostnames. The control plane has
+`domain_access_logs` plus admin ingestion and summary endpoints so a node-side
+Xray access-log shipper can submit sanitized domain-only events later. Do not
+send full URLs, paths, query strings, or request bodies.
+
 ## Tech Stack
 
 - Go: simple static deployment, fast startup, strong standard library, and a
@@ -313,6 +322,7 @@ PCP_MAINTENANCE_CLEANUP_ENABLED=false
 PCP_MAINTENANCE_CLEANUP_INTERVAL=24h
 PCP_MAINTENANCE_TRAFFIC_RETENTION=7d
 PCP_MAINTENANCE_TRAFFIC_DAILY_RETENTION=30d
+PCP_MAINTENANCE_DOMAIN_ACCESS_RETENTION=30d
 PCP_MAINTENANCE_AUDIT_RETENTION=90d
 ```
 
@@ -356,6 +366,7 @@ interval is 24 hours. The retention defaults are:
 
 - `traffic_usage`: 7 days
 - `traffic_usage_daily`: 30 days
+- `domain_access_logs`: 30 days
 - `audit_logs`: 90 days
 
 Runtime precedence is:
@@ -486,7 +497,7 @@ Useful flags:
 ./proxy-control-plane subscription token encrypt --token-file .local/generated/legacy-public-subscription.txt
 ./proxy-control-plane maintenance cleanup --dry-run
 ./proxy-control-plane maintenance cleanup
-./proxy-control-plane maintenance cleanup --traffic-retention=7d --traffic-daily-retention=30d --audit-retention=90d
+./proxy-control-plane maintenance cleanup --traffic-retention=7d --traffic-daily-retention=30d --domain-access-retention=30d --audit-retention=90d
 ./proxy-control-plane db migrate --database-url='postgres://user:password@host:5432/proxy_control?sslmode=require'
 ./proxy-control-plane db migrate --migrations-dir=migrations
 ./proxy-control-plane db automigrate
@@ -509,6 +520,7 @@ age retention only:
 
 - `traffic_usage`: 7 days
 - `traffic_usage_daily`: 30 days
+- `domain_access_logs`: 30 days
 - `audit_logs`: 90 days
 
 Run cleanup in dry-run mode first:
@@ -518,6 +530,7 @@ Run cleanup in dry-run mode first:
   --audit-retention=90d \
   --traffic-retention=7d \
   --traffic-daily-retention=30d \
+  --domain-access-retention=30d \
   --dry-run
 ```
 
@@ -528,7 +541,8 @@ writes to PostgreSQL:
 ./proxy-control-plane maintenance cleanup \
   --audit-retention=90d \
   --traffic-retention=7d \
-  --traffic-daily-retention=30d
+  --traffic-daily-retention=30d \
+  --domain-access-retention=30d
 ```
 
 For normal deployment, you can let the API process run the same cleanup
@@ -589,6 +603,9 @@ Subscription tokens:
 Traffic:
 
 - `POST /admin/traffic-usage`
+- `GET /admin/domain-access-logs`
+- `POST /admin/domain-access-logs`
+- `GET /admin/domain-access-summary`
 
 Client subscription:
 

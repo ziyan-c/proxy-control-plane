@@ -115,8 +115,8 @@ func (s *Syncer) syncAll(ctx context.Context) {
 				log.Printf("traffic sync node %s failed: %v", node.Name, err)
 				return
 			}
-			log.Printf("traffic sync node %s collected: users=%d rows=%d upload=%d download=%d",
-				node.Name, result.UserCount, result.RowsInserted, result.UploadBytes, result.DownloadBytes)
+			log.Printf("traffic sync node %s collected: users=%d rows=%d upload_gb=%.6f download_gb=%.6f",
+				node.Name, result.UserCount, result.RowsInserted, domain.BytesToGB(result.UploadBytes), domain.BytesToGB(result.DownloadBytes))
 		}()
 	}
 	wg.Wait()

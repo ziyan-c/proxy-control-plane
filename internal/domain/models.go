@@ -1,6 +1,15 @@
 package domain
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
+
+const bytesPerGB = 1000 * 1000 * 1000
+
+func BytesToGB(bytes int64) float64 {
+	return float64(bytes) / bytesPerGB
+}
 
 type Customer struct {
 	ID          string     `json:"id" gorm:"primaryKey;type:text"`
@@ -94,6 +103,23 @@ type TrafficUsage struct {
 	ProxyNode    ProxyNode    `json:"-" gorm:"foreignKey:ProxyNodeID;constraint:OnDelete:CASCADE;"`
 }
 
+func (t TrafficUsage) MarshalJSON() ([]byte, error) {
+	type Alias TrafficUsage
+	return json.Marshal(struct {
+		Alias
+		TotalBytes int64   `json:"total_bytes"`
+		UploadGB   float64 `json:"upload_gb"`
+		DownloadGB float64 `json:"download_gb"`
+		TotalGB    float64 `json:"total_gb"`
+	}{
+		Alias:      Alias(t),
+		TotalBytes: t.UploadBytes + t.DownloadBytes,
+		UploadGB:   BytesToGB(t.UploadBytes),
+		DownloadGB: BytesToGB(t.DownloadBytes),
+		TotalGB:    BytesToGB(t.UploadBytes + t.DownloadBytes),
+	})
+}
+
 type TrafficUsageDaily struct {
 	ProxyAccountID string    `json:"proxy_account_id" gorm:"primaryKey;type:text;not null"`
 	ProxyNodeID    string    `json:"proxy_node_id" gorm:"primaryKey;type:text;not null"`
@@ -107,6 +133,23 @@ type TrafficUsageDaily struct {
 	ProxyNode    ProxyNode    `json:"-" gorm:"foreignKey:ProxyNodeID;constraint:OnDelete:CASCADE;"`
 }
 
+func (t TrafficUsageDaily) MarshalJSON() ([]byte, error) {
+	type Alias TrafficUsageDaily
+	return json.Marshal(struct {
+		Alias
+		TotalBytes int64   `json:"total_bytes"`
+		UploadGB   float64 `json:"upload_gb"`
+		DownloadGB float64 `json:"download_gb"`
+		TotalGB    float64 `json:"total_gb"`
+	}{
+		Alias:      Alias(t),
+		TotalBytes: t.UploadBytes + t.DownloadBytes,
+		UploadGB:   BytesToGB(t.UploadBytes),
+		DownloadGB: BytesToGB(t.DownloadBytes),
+		TotalGB:    BytesToGB(t.UploadBytes + t.DownloadBytes),
+	})
+}
+
 type RuntimeUser struct {
 	ProxyAccountID string `json:"proxy_account_id,omitempty"`
 	Email          string `json:"email"`
@@ -118,6 +161,83 @@ type TrafficDelta struct {
 	ProxyAccountID string `json:"proxy_account_id"`
 	UploadBytes    int64  `json:"upload_bytes"`
 	DownloadBytes  int64  `json:"download_bytes"`
+}
+
+func (t TrafficDelta) MarshalJSON() ([]byte, error) {
+	type Alias TrafficDelta
+	return json.Marshal(struct {
+		Alias
+		TotalBytes int64   `json:"total_bytes"`
+		UploadGB   float64 `json:"upload_gb"`
+		DownloadGB float64 `json:"download_gb"`
+		TotalGB    float64 `json:"total_gb"`
+	}{
+		Alias:      Alias(t),
+		TotalBytes: t.UploadBytes + t.DownloadBytes,
+		UploadGB:   BytesToGB(t.UploadBytes),
+		DownloadGB: BytesToGB(t.DownloadBytes),
+		TotalGB:    BytesToGB(t.UploadBytes + t.DownloadBytes),
+	})
+}
+
+type DomainAccessLog struct {
+	ID             string    `json:"id" gorm:"primaryKey;type:text"`
+	ProxyAccountID string    `json:"proxy_account_id" gorm:"index:idx_domain_access_logs_account_accessed,priority:1;not null"`
+	ProxyNodeID    string    `json:"proxy_node_id" gorm:"index:idx_domain_access_logs_node_accessed,priority:1;not null"`
+	Domain         string    `json:"domain" gorm:"index:idx_domain_access_logs_domain_accessed,priority:1;not null"`
+	EventCount     int64     `json:"event_count" gorm:"not null;default:1"`
+	UploadBytes    int64     `json:"upload_bytes" gorm:"not null;default:0"`
+	DownloadBytes  int64     `json:"download_bytes" gorm:"not null;default:0"`
+	AccessedAt     time.Time `json:"accessed_at" gorm:"index;index:idx_domain_access_logs_account_accessed,priority:2;index:idx_domain_access_logs_node_accessed,priority:2;index:idx_domain_access_logs_domain_accessed,priority:2;not null"`
+	CreatedAt      time.Time `json:"created_at"`
+
+	ProxyAccount ProxyAccount `json:"-" gorm:"foreignKey:ProxyAccountID;constraint:OnDelete:CASCADE;"`
+	ProxyNode    ProxyNode    `json:"-" gorm:"foreignKey:ProxyNodeID;constraint:OnDelete:CASCADE;"`
+}
+
+func (d DomainAccessLog) MarshalJSON() ([]byte, error) {
+	type Alias DomainAccessLog
+	return json.Marshal(struct {
+		Alias
+		TotalBytes int64   `json:"total_bytes"`
+		UploadGB   float64 `json:"upload_gb"`
+		DownloadGB float64 `json:"download_gb"`
+		TotalGB    float64 `json:"total_gb"`
+	}{
+		Alias:      Alias(d),
+		TotalBytes: d.UploadBytes + d.DownloadBytes,
+		UploadGB:   BytesToGB(d.UploadBytes),
+		DownloadGB: BytesToGB(d.DownloadBytes),
+		TotalGB:    BytesToGB(d.UploadBytes + d.DownloadBytes),
+	})
+}
+
+type DomainAccessSummary struct {
+	ProxyAccountID  string    `json:"proxy_account_id"`
+	ProxyNodeID     string    `json:"proxy_node_id"`
+	Domain          string    `json:"domain"`
+	EventCount      int64     `json:"event_count"`
+	UploadBytes     int64     `json:"upload_bytes"`
+	DownloadBytes   int64     `json:"download_bytes"`
+	FirstAccessedAt time.Time `json:"first_accessed_at"`
+	LastAccessedAt  time.Time `json:"last_accessed_at"`
+}
+
+func (d DomainAccessSummary) MarshalJSON() ([]byte, error) {
+	type Alias DomainAccessSummary
+	return json.Marshal(struct {
+		Alias
+		TotalBytes int64   `json:"total_bytes"`
+		UploadGB   float64 `json:"upload_gb"`
+		DownloadGB float64 `json:"download_gb"`
+		TotalGB    float64 `json:"total_gb"`
+	}{
+		Alias:      Alias(d),
+		TotalBytes: d.UploadBytes + d.DownloadBytes,
+		UploadGB:   BytesToGB(d.UploadBytes),
+		DownloadGB: BytesToGB(d.DownloadBytes),
+		TotalGB:    BytesToGB(d.UploadBytes + d.DownloadBytes),
+	})
 }
 
 type AuditLog struct {
@@ -134,6 +254,10 @@ func (TrafficUsage) TableName() string {
 
 func (TrafficUsageDaily) TableName() string {
 	return "traffic_usage_daily"
+}
+
+func (DomainAccessLog) TableName() string {
+	return "domain_access_logs"
 }
 
 func (AuditLog) TableName() string {

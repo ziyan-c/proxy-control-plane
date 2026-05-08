@@ -35,6 +35,7 @@ type Config struct {
 	MaintenanceAuditRetention        string
 	MaintenanceTrafficRetention      string
 	MaintenanceTrafficDailyRetention string
+	MaintenanceDomainAccessRetention string
 }
 
 func Load() Config {
@@ -63,6 +64,7 @@ func Load() Config {
 		MaintenanceAuditRetention:        getEnv("PCP_MAINTENANCE_AUDIT_RETENTION", "90d"),
 		MaintenanceTrafficRetention:      getEnv("PCP_MAINTENANCE_TRAFFIC_RETENTION", "7d"),
 		MaintenanceTrafficDailyRetention: getEnv("PCP_MAINTENANCE_TRAFFIC_DAILY_RETENTION", "30d"),
+		MaintenanceDomainAccessRetention: getEnv("PCP_MAINTENANCE_DOMAIN_ACCESS_RETENTION", "30d"),
 	}
 }
 

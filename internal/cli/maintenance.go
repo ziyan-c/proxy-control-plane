@@ -14,6 +14,7 @@ type maintenanceCleanupOptions struct {
 	auditRetention        string
 	trafficRetention      string
 	trafficDailyRetention string
+	domainAccessRetention string
 	dryRun                bool
 }
 
@@ -32,6 +33,7 @@ func newMaintenanceCleanupCommand(rootOpts *Options) *cobra.Command {
 		auditRetention:        "90d",
 		trafficRetention:      "7d",
 		trafficDailyRetention: "30d",
+		domainAccessRetention: "30d",
 	}
 
 	cmd := &cobra.Command{
@@ -45,6 +47,7 @@ func newMaintenanceCleanupCommand(rootOpts *Options) *cobra.Command {
 	cmd.Flags().StringVar(&cleanupOpts.auditRetention, "audit-retention", cleanupOpts.auditRetention, "delete audit logs older than this retention, for example 90d")
 	cmd.Flags().StringVar(&cleanupOpts.trafficRetention, "traffic-retention", cleanupOpts.trafficRetention, "aggregate and delete traffic_usage rows older than this retention, for example 7d")
 	cmd.Flags().StringVar(&cleanupOpts.trafficDailyRetention, "traffic-daily-retention", cleanupOpts.trafficDailyRetention, "delete traffic_usage_daily rows older than this retention, for example 30d")
+	cmd.Flags().StringVar(&cleanupOpts.domainAccessRetention, "domain-access-retention", cleanupOpts.domainAccessRetention, "delete domain_access_logs rows older than this retention, for example 30d")
 	cmd.Flags().BoolVar(&cleanupOpts.dryRun, "dry-run", cleanupOpts.dryRun, "show what would be changed without writing PostgreSQL")
 	return cmd
 }
@@ -62,6 +65,10 @@ func runMaintenanceCleanup(cmd *cobra.Command, rootOpts *Options, serviceOpts *s
 	if err != nil {
 		return fmt.Errorf("--traffic-daily-retention: %w", err)
 	}
+	domainAccessRetention, err := parseRetentionDuration(cleanupOpts.domainAccessRetention)
+	if err != nil {
+		return fmt.Errorf("--domain-access-retention: %w", err)
+	}
 
 	ctx := cmd.Context()
 	st, err := openStoreForCLI(ctx, cmd, rootOpts, serviceOpts)
@@ -74,6 +81,7 @@ func runMaintenanceCleanup(cmd *cobra.Command, rootOpts *Options, serviceOpts *s
 		AuditRetention:        auditRetention,
 		TrafficRetention:      trafficRetention,
 		TrafficDailyRetention: trafficDailyRetention,
+		DomainAccessRetention: domainAccessRetention,
 		DryRun:                cleanupOpts.dryRun,
 	})
 	if err != nil {
@@ -89,6 +97,7 @@ func runMaintenanceCleanup(cmd *cobra.Command, rootOpts *Options, serviceOpts *s
 	fmt.Fprintf(out, "audit_cutoff=%s audit_rows=%d\n", result.AuditCutoff.Format(time.RFC3339), result.AuditRowsDeleted)
 	fmt.Fprintf(out, "traffic_cutoff=%s traffic_rows=%d traffic_daily_rows=%d\n", result.TrafficCutoff.Format(time.RFC3339), result.TrafficRowsDeleted, result.TrafficDailyRowsUpserted)
 	fmt.Fprintf(out, "traffic_daily_cutoff=%s traffic_daily_rows_deleted=%d\n", result.TrafficDailyCutoff.Format(time.RFC3339), result.TrafficDailyRowsDeleted)
+	fmt.Fprintf(out, "domain_access_cutoff=%s domain_access_rows=%d\n", result.DomainAccessCutoff.Format(time.RFC3339), result.DomainAccessRowsDeleted)
 	return nil
 }
 
