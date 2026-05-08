@@ -659,3 +659,7 @@ go test ./...
 go vet ./...
 docker compose -f docker-compose.yml config --quiet
 ```
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).

@@ -612,3 +612,7 @@ go test ./...
 go vet ./...
 docker compose -f docker-compose.yml config --quiet
 ```
+
+## License
+
+本项目使用 Apache License 2.0。详情见 [LICENSE](LICENSE)。
