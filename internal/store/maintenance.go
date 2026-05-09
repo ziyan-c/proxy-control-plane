@@ -12,6 +12,7 @@ type MaintenanceCleanupInput struct {
 	TrafficRetention      time.Duration
 	TrafficDailyRetention time.Duration
 	DomainAccessRetention time.Duration
+	AuthRefreshRetention  time.Duration
 	DryRun                bool
 	Now                   time.Time
 }
@@ -22,15 +23,17 @@ type MaintenanceCleanupResult struct {
 	TrafficCutoff            time.Time `json:"traffic_cutoff"`
 	TrafficDailyCutoff       time.Time `json:"traffic_daily_cutoff"`
 	DomainAccessCutoff       time.Time `json:"domain_access_cutoff"`
+	AuthRefreshCutoff        time.Time `json:"auth_refresh_cutoff"`
 	AuditRowsDeleted         int64     `json:"audit_rows_deleted"`
 	TrafficRowsDeleted       int64     `json:"traffic_rows_deleted"`
 	TrafficDailyRowsUpserted int64     `json:"traffic_daily_rows_upserted"`
 	TrafficDailyRowsDeleted  int64     `json:"traffic_daily_rows_deleted"`
 	DomainAccessRowsDeleted  int64     `json:"domain_access_rows_deleted"`
+	AuthRefreshRowsDeleted   int64     `json:"auth_refresh_rows_deleted"`
 }
 
 func (s *Store) MaintenanceCleanup(ctx context.Context, input MaintenanceCleanupInput) (MaintenanceCleanupResult, error) {
-	if input.AuditRetention <= 0 || input.TrafficRetention <= 0 || input.TrafficDailyRetention <= 0 || input.DomainAccessRetention <= 0 {
+	if input.AuditRetention <= 0 || input.TrafficRetention <= 0 || input.TrafficDailyRetention <= 0 || input.DomainAccessRetention <= 0 || input.AuthRefreshRetention <= 0 {
 		return MaintenanceCleanupResult{}, ErrInvalid
 	}
 	now := input.Now
@@ -45,6 +48,7 @@ func (s *Store) MaintenanceCleanup(ctx context.Context, input MaintenanceCleanup
 		TrafficCutoff:      now.Add(-input.TrafficRetention),
 		TrafficDailyCutoff: now.Add(-input.TrafficDailyRetention),
 		DomainAccessCutoff: now.Add(-input.DomainAccessRetention),
+		AuthRefreshCutoff:  now.Add(-input.AuthRefreshRetention),
 	}
 
 	if input.DryRun {
@@ -81,6 +85,12 @@ func (s *Store) MaintenanceCleanup(ctx context.Context, input MaintenanceCleanup
 			return err
 		}
 		result.TrafficDailyRowsDeleted = dailyDelete.RowsAffected
+
+		authRefreshDelete := tx.Exec(deleteAuthRefreshTokensSQL, result.AuthRefreshCutoff, result.AuthRefreshCutoff)
+		if err := mapGormError(authRefreshDelete.Error); err != nil {
+			return err
+		}
+		result.AuthRefreshRowsDeleted = authRefreshDelete.RowsAffected
 		return nil
 	})
 	if err != nil {
@@ -120,6 +130,12 @@ func (s *Store) maintenanceCleanupDryRun(ctx context.Context, result Maintenance
 		return MaintenanceCleanupResult{}, err
 	}
 	result.TrafficDailyRowsDeleted = dailyDeleteRows
+
+	authRefreshRows, err := countAuthRefreshRowsForCleanupTx(tx, result.AuthRefreshCutoff)
+	if err != nil {
+		return MaintenanceCleanupResult{}, err
+	}
+	result.AuthRefreshRowsDeleted = authRefreshRows
 	return result, nil
 }
 
@@ -174,6 +190,16 @@ SELECT COUNT(*)
 FROM domain_access_logs
 WHERE accessed_at < ?
 `, cutoff).Scan(&count).Error
+	return count, mapGormError(err)
+}
+
+func countAuthRefreshRowsForCleanupTx(tx *gorm.DB, cutoff time.Time) (int64, error) {
+	var count int64
+	err := tx.Raw(`
+SELECT COUNT(*)
+FROM auth_refresh_tokens
+WHERE expires_at < ? OR revoked_at < ?
+`, cutoff, cutoff).Scan(&count).Error
 	return count, mapGormError(err)
 }
 
@@ -232,4 +258,9 @@ WHERE day < ?::date
 const deleteDomainAccessLogsSQL = `
 DELETE FROM domain_access_logs
 WHERE accessed_at < ?
+`
+
+const deleteAuthRefreshTokensSQL = `
+DELETE FROM auth_refresh_tokens
+WHERE expires_at < ? OR revoked_at < ?
 `

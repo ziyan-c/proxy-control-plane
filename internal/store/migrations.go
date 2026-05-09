@@ -37,6 +37,7 @@ func (s *Store) AutoMigrate(ctx context.Context) error {
 		&domain.ProxyNode{},
 		&domain.ProxyAccount{},
 		&domain.SubscriptionToken{},
+		&domain.AuthRefreshToken{},
 		&domain.TrafficUsage{},
 		&domain.TrafficUsageDaily{},
 		&domain.DomainAccessLog{},

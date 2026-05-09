@@ -2,26 +2,47 @@ package domain
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 )
 
 const bytesPerGB = 1000 * 1000 * 1000
+const CustomerStatusActive = "active"
 
 func BytesToGB(bytes int64) float64 {
 	return float64(bytes) / bytesPerGB
 }
 
+func NormalizeCustomerStatus(status string) string {
+	return strings.ToLower(strings.TrimSpace(status))
+}
+
+func CustomerStatusOrDefault(status string) string {
+	status = NormalizeCustomerStatus(status)
+	if status == "" {
+		return CustomerStatusActive
+	}
+	return status
+}
+
+func CustomerStatusIsActive(status string) bool {
+	return NormalizeCustomerStatus(status) == CustomerStatusActive
+}
+
 type Customer struct {
-	ID          string     `json:"id" gorm:"primaryKey;type:text"`
-	Email       string     `json:"email" gorm:"uniqueIndex;not null"`
-	DisplayName string     `json:"display_name,omitempty"`
-	Status      string     `json:"status" gorm:"index;not null"`
-	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	ID           string     `json:"id" gorm:"primaryKey;type:text"`
+	Email        string     `json:"email" gorm:"uniqueIndex;not null"`
+	DisplayName  string     `json:"display_name,omitempty"`
+	Status       string     `json:"status" gorm:"index;not null"`
+	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
+	PasswordHash string     `json:"-" gorm:"column:password_hash"`
+	SessionEpoch string     `json:"-" gorm:"column:session_epoch;not null;default:''"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 
 	ProxyAccounts      []ProxyAccount      `json:"-" gorm:"foreignKey:CustomerID;constraint:OnDelete:CASCADE;"`
 	SubscriptionTokens []SubscriptionToken `json:"-" gorm:"foreignKey:CustomerID;constraint:OnDelete:CASCADE;"`
+	AuthRefreshTokens  []AuthRefreshToken  `json:"-" gorm:"foreignKey:CustomerID;constraint:OnDelete:CASCADE;"`
 }
 
 type ProxyNode struct {
@@ -87,6 +108,26 @@ type SubscriptionToken struct {
 	LastUsedIP        string     `json:"last_used_ip,omitempty"`
 	LastUsedUserAgent string     `json:"last_used_user_agent,omitempty"`
 	PlainToken        string     `json:"plain_token,omitempty" gorm:"-"`
+
+	Customer Customer `json:"-" gorm:"foreignKey:CustomerID;constraint:OnDelete:CASCADE;"`
+}
+
+type AuthRefreshToken struct {
+	ID                string     `json:"id" gorm:"primaryKey;type:text"`
+	PrincipalType     string     `json:"principal_type" gorm:"index;not null"`
+	CustomerID        *string    `json:"customer_id,omitempty" gorm:"index"`
+	Subject           string     `json:"subject" gorm:"not null"`
+	SessionVersion    string     `json:"-" gorm:"column:session_version;not null"`
+	TokenHash         string     `json:"-" gorm:"uniqueIndex;not null"`
+	Enabled           bool       `json:"enabled" gorm:"index;not null"`
+	ExpiresAt         time.Time  `json:"expires_at" gorm:"index;not null"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	LastUsedAt        *time.Time `json:"last_used_at,omitempty"`
+	LastUsedIP        string     `json:"last_used_ip,omitempty"`
+	LastUsedUserAgent string     `json:"last_used_user_agent,omitempty"`
+	RevokedAt         *time.Time `json:"revoked_at,omitempty"`
+	ReplacedByID      string     `json:"replaced_by_id,omitempty"`
 
 	Customer Customer `json:"-" gorm:"foreignKey:CustomerID;constraint:OnDelete:CASCADE;"`
 }

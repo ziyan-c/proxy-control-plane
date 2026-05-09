@@ -17,9 +17,11 @@ type Config struct {
 	DatabaseURL                      string
 	AdminEmail                       string
 	AdminPassword                    string
+	AdminSessionEpoch                string
 	SecretKey                        string
 	DatabaseEncryptionKey            string
 	AccessTokenExpireMinutes         int
+	RefreshTokenExpireHours          int
 	AutoCreateDatabase               bool
 	AutoMigrate                      bool
 	RuntimeSyncEnabled               bool
@@ -36,6 +38,7 @@ type Config struct {
 	MaintenanceTrafficRetention      string
 	MaintenanceTrafficDailyRetention string
 	MaintenanceDomainAccessRetention string
+	MaintenanceAuthRefreshRetention  string
 }
 
 func Load() Config {
@@ -46,9 +49,11 @@ func Load() Config {
 		DatabaseURL:                      normalizeDatabaseURL(getEnv("PCP_DATABASE_URL", "postgres://proxy_control_app:change-me@127.0.0.1:5432/proxy_control?sslmode=disable")),
 		AdminEmail:                       getEnv("PCP_ADMIN_EMAIL", "admin@example.com"),
 		AdminPassword:                    getEnv("PCP_ADMIN_PASSWORD", "change-me-admin-password"),
+		AdminSessionEpoch:                getEnv("PCP_ADMIN_SESSION_EPOCH", ""),
 		SecretKey:                        getEnv("PCP_SECRET_KEY", "change-me-with-openssl-rand-base64-32"),
 		DatabaseEncryptionKey:            getEnv("PCP_DATABASE_ENCRYPTION_KEY", ""),
-		AccessTokenExpireMinutes:         getEnvInt("PCP_ACCESS_TOKEN_EXPIRE_MINUTES", 60),
+		AccessTokenExpireMinutes:         getEnvInt("PCP_ACCESS_TOKEN_EXPIRE_MINUTES", 30),
+		RefreshTokenExpireHours:          getEnvInt("PCP_REFRESH_TOKEN_EXPIRE_HOURS", 360),
 		AutoCreateDatabase:               getEnvBool("PCP_AUTO_CREATE_DATABASE", true),
 		AutoMigrate:                      getEnvBool("PCP_AUTO_MIGRATE", false),
 		RuntimeSyncEnabled:               getEnvBool("PCP_RUNTIME_SYNC_ENABLED", false),
@@ -65,11 +70,16 @@ func Load() Config {
 		MaintenanceTrafficRetention:      getEnv("PCP_MAINTENANCE_TRAFFIC_RETENTION", "7d"),
 		MaintenanceTrafficDailyRetention: getEnv("PCP_MAINTENANCE_TRAFFIC_DAILY_RETENTION", "30d"),
 		MaintenanceDomainAccessRetention: getEnv("PCP_MAINTENANCE_DOMAIN_ACCESS_RETENTION", "30d"),
+		MaintenanceAuthRefreshRetention:  getEnv("PCP_MAINTENANCE_AUTH_REFRESH_RETENTION", "30d"),
 	}
 }
 
 func (c Config) AccessTokenTTL() time.Duration {
 	return time.Duration(c.AccessTokenExpireMinutes) * time.Minute
+}
+
+func (c Config) RefreshTokenTTL() time.Duration {
+	return time.Duration(c.RefreshTokenExpireHours) * time.Hour
 }
 
 func (c Config) ValidateServer() error {
@@ -83,13 +93,16 @@ func (c Config) ValidateServer() error {
 	if isPlaceholderSecret(c.SecretKey) || len(c.SecretKey) < 32 {
 		problems = append(problems, "PCP_SECRET_KEY must be changed and contain at least 32 characters")
 	}
-	if strings.TrimSpace(c.DatabaseEncryptionKey) != "" {
-		if _, err := security.ParseDatabaseEncryptionKey(c.DatabaseEncryptionKey); err != nil {
-			problems = append(problems, "PCP_DATABASE_ENCRYPTION_KEY "+err.Error())
-		}
+	if strings.TrimSpace(c.DatabaseEncryptionKey) == "" {
+		problems = append(problems, "PCP_DATABASE_ENCRYPTION_KEY must be set to a base64-encoded 32-byte key")
+	} else if _, err := security.ParseDatabaseEncryptionKey(c.DatabaseEncryptionKey); err != nil {
+		problems = append(problems, "PCP_DATABASE_ENCRYPTION_KEY "+err.Error())
 	}
 	if c.AccessTokenExpireMinutes <= 0 {
 		problems = append(problems, "PCP_ACCESS_TOKEN_EXPIRE_MINUTES must be greater than 0")
+	}
+	if c.RefreshTokenExpireHours <= 0 {
+		problems = append(problems, "PCP_REFRESH_TOKEN_EXPIRE_HOURS must be greater than 0")
 	}
 	if c.RuntimeSyncEnabled {
 		if c.RuntimeSyncInterval <= 0 {

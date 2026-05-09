@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/ziyan-c/proxy-control-plane/internal/config"
 	"github.com/ziyan-c/proxy-control-plane/internal/domain"
+	"github.com/ziyan-c/proxy-control-plane/internal/security"
 )
 
 func TestPatchHelpersClearNullableFields(t *testing.T) {
@@ -136,6 +138,132 @@ func TestRedactLogPath(t *testing.T) {
 				t.Fatalf("redactLogPath() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRequireAdminRejectsCustomerAccessToken(t *testing.T) {
+	token, err := security.CreateAccessToken(security.AccessClaims{
+		Subject: "customer-1",
+		Role:    security.PrincipalTypeCustomer,
+	}, "test-secret-key", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	router := gin.New()
+	server := &Server{cfg: config.Config{SecretKey: "test-secret-key"}}
+	router.GET("/admin/test", server.requireAdmin(), func(c *gin.Context) {
+		c.Status(http.StatusNoContent)
+	})
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/admin/test", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusForbidden)
+	}
+}
+
+func TestRequireCustomerAcceptsCustomerAccessToken(t *testing.T) {
+	token, err := security.CreateAccessToken(security.AccessClaims{
+		Subject: "customer-1",
+		Role:    security.PrincipalTypeCustomer,
+	}, "test-secret-key", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	router := gin.New()
+	server := &Server{cfg: config.Config{SecretKey: "test-secret-key"}}
+	router.GET("/customer/me", server.requireCustomer(), func(c *gin.Context) {
+		claims, ok := claimsFromContext(c)
+		if !ok {
+			t.Fatal("missing auth claims")
+		}
+		if claims.Subject != "customer-1" {
+			t.Fatalf("subject = %q, want customer-1", claims.Subject)
+		}
+		c.Status(http.StatusNoContent)
+	})
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/customer/me", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNoContent)
+	}
+}
+
+func TestActiveSubscriptionTokenRejectsDisabledOrExpired(t *testing.T) {
+	now := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+	future := now.Add(time.Hour)
+	past := now.Add(-time.Hour)
+
+	tests := []struct {
+		name  string
+		token domain.SubscriptionToken
+		want  bool
+	}{
+		{
+			name:  "enabled without expiry",
+			token: domain.SubscriptionToken{Enabled: true},
+			want:  true,
+		},
+		{
+			name:  "enabled future expiry",
+			token: domain.SubscriptionToken{Enabled: true, ExpiresAt: &future},
+			want:  true,
+		},
+		{
+			name:  "disabled",
+			token: domain.SubscriptionToken{Enabled: false, ExpiresAt: &future},
+			want:  false,
+		},
+		{
+			name:  "expired",
+			token: domain.SubscriptionToken{Enabled: true, ExpiresAt: &past},
+			want:  false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := activeSubscriptionToken(tc.token, now); got != tc.want {
+				t.Fatalf("activeSubscriptionToken() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCustomerSessionVersionChangesWithEmailPasswordAndEpoch(t *testing.T) {
+	server := &Server{cfg: config.Config{SecretKey: "test-secret-key"}}
+	customer := domain.Customer{
+		ID:           "customer-1",
+		Email:        "old@example.com",
+		PasswordHash: "hash-1",
+		SessionEpoch: "epoch-1",
+	}
+	version := server.customerSessionVersion(customer)
+
+	customer.Email = "new@example.com"
+	if version == server.customerSessionVersion(customer) {
+		t.Fatal("customer session version did not change after email update")
+	}
+
+	customer.Email = "old@example.com"
+	customer.PasswordHash = "hash-2"
+	if version == server.customerSessionVersion(customer) {
+		t.Fatal("customer session version did not change after password update")
+	}
+
+	customer.PasswordHash = "hash-1"
+	customer.SessionEpoch = "epoch-2"
+	if version == server.customerSessionVersion(customer) {
+		t.Fatal("customer session version did not change after epoch update")
 	}
 }
 

@@ -40,6 +40,7 @@ type serviceOptions struct {
 	maintenanceTrafficRetention      string
 	maintenanceTrafficDailyRetention string
 	maintenanceDomainAccessRetention string
+	maintenanceAuthRefreshRetention  string
 	migrationsDir                    string
 	noLocalConfig                    bool
 }
@@ -87,6 +88,7 @@ func newServerServeCommand(rootOpts *Options) *cobra.Command {
 	cmd.Flags().StringVar(&opts.maintenanceTrafficRetention, "maintenance-traffic-retention", "", "aggregate and delete traffic_usage rows older than this retention, for example 7d")
 	cmd.Flags().StringVar(&opts.maintenanceTrafficDailyRetention, "maintenance-traffic-daily-retention", "", "delete traffic_usage_daily rows older than this retention, for example 30d")
 	cmd.Flags().StringVar(&opts.maintenanceDomainAccessRetention, "maintenance-domain-access-retention", "", "delete domain_access_logs rows older than this retention, for example 30d")
+	cmd.Flags().StringVar(&opts.maintenanceAuthRefreshRetention, "maintenance-auth-refresh-retention", "", "delete auth_refresh_tokens after this retention from revoke/expiry time, for example 30d")
 	return cmd
 }
 
@@ -289,6 +291,9 @@ func applyServiceOptions(cfg *config.Config, opts *serviceOptions) error {
 	if opts.maintenanceDomainAccessRetention != "" {
 		cfg.MaintenanceDomainAccessRetention = opts.maintenanceDomainAccessRetention
 	}
+	if opts.maintenanceAuthRefreshRetention != "" {
+		cfg.MaintenanceAuthRefreshRetention = opts.maintenanceAuthRefreshRetention
+	}
 	return nil
 }
 
@@ -383,20 +388,26 @@ func maintenanceCleanupInputFromConfig(cfg config.Config) (time.Duration, store.
 	if err != nil {
 		return 0, store.MaintenanceCleanupInput{}, fmt.Errorf("PCP_MAINTENANCE_DOMAIN_ACCESS_RETENTION: %w", err)
 	}
+	authRefreshRetention, err := parseRetentionDuration(cfg.MaintenanceAuthRefreshRetention)
+	if err != nil {
+		return 0, store.MaintenanceCleanupInput{}, fmt.Errorf("PCP_MAINTENANCE_AUTH_REFRESH_RETENTION: %w", err)
+	}
 	return cfg.MaintenanceCleanupInterval, store.MaintenanceCleanupInput{
 		AuditRetention:        auditRetention,
 		TrafficRetention:      trafficRetention,
 		TrafficDailyRetention: trafficDailyRetention,
 		DomainAccessRetention: domainAccessRetention,
+		AuthRefreshRetention:  authRefreshRetention,
 	}, nil
 }
 
 func runMaintenanceCleanupLoop(ctx context.Context, st *store.Store, interval time.Duration, input store.MaintenanceCleanupInput) {
-	log.Printf("maintenance cleanup enabled: interval=%s traffic_retention=%s traffic_daily_retention=%s domain_access_retention=%s audit_retention=%s",
+	log.Printf("maintenance cleanup enabled: interval=%s traffic_retention=%s traffic_daily_retention=%s domain_access_retention=%s auth_refresh_retention=%s audit_retention=%s",
 		interval,
 		input.TrafficRetention,
 		input.TrafficDailyRetention,
 		input.DomainAccessRetention,
+		input.AuthRefreshRetention,
 		input.AuditRetention,
 	)
 	runMaintenanceCleanupOnce(ctx, st, input)
@@ -421,11 +432,12 @@ func runMaintenanceCleanupOnce(ctx context.Context, st *store.Store, input store
 		log.Printf("maintenance cleanup failed: %v", err)
 		return
 	}
-	log.Printf("maintenance cleanup complete: traffic_rows=%d traffic_daily_rows=%d traffic_daily_deleted=%d domain_access_rows=%d audit_rows=%d",
+	log.Printf("maintenance cleanup complete: traffic_rows=%d traffic_daily_rows=%d traffic_daily_deleted=%d domain_access_rows=%d auth_refresh_rows=%d audit_rows=%d",
 		result.TrafficRowsDeleted,
 		result.TrafficDailyRowsUpserted,
 		result.TrafficDailyRowsDeleted,
 		result.DomainAccessRowsDeleted,
+		result.AuthRefreshRowsDeleted,
 		result.AuditRowsDeleted,
 	)
 }

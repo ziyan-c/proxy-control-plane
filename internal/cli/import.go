@@ -234,6 +234,11 @@ func runImportSubscriptionFile(cmd *cobra.Command, rootOpts *Options, serviceOpt
 		return err
 	}
 	defer st.Close()
+	if importOpts.createToken {
+		if err := requireDatabaseEncryptionKey(cfg); err != nil {
+			return err
+		}
+	}
 
 	result, err := st.ImportLegacySubscriptionFile(ctx, store.LegacySubscriptionFileImport{
 		CustomerEmail:         importOpts.customerEmail,

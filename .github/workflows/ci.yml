@@ -60,6 +60,7 @@ jobs:
           PCP_ADMIN_EMAIL: ci-admin@example.test
           PCP_ADMIN_PASSWORD: ci-admin-password-for-tests
           PCP_SECRET_KEY: ci-secret-key-for-tests-that-is-long-enough
+          PCP_DATABASE_ENCRYPTION_KEY: ZXhhbXBsZS1kYXRhYmFzZS1lbmNyeXB0aW9uLWtleSE=
           PCP_ACCESS_TOKEN_EXPIRE_MINUTES: 15
           PCP_AUTO_CREATE_DATABASE: "true"
           PCP_AUTO_MIGRATE: "false"

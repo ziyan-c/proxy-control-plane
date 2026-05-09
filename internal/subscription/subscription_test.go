@@ -77,6 +77,29 @@ func TestBuildReturnsEmptyForInactiveCustomer(t *testing.T) {
 	}
 }
 
+func TestBuildAcceptsNormalizedActiveCustomerStatus(t *testing.T) {
+	customer := domain.Customer{ID: "customer-1", Status: " Active "}
+	account := domain.ProxyAccount{
+		CustomerID: "customer-1",
+		Protocol:   "vless",
+		UUID:       "00000000-0000-4000-8000-000000000001",
+		EmailTag:   "alice",
+		Enabled:    true,
+		Nodes: []domain.ProxyNode{{
+			Name:     "node",
+			Hostname: "proxy.example.com",
+			Protocol: "vless",
+			Port:     443,
+			Enabled:  true,
+		}},
+	}
+
+	body := Build(customer, []domain.ProxyAccount{account}, "raw", time.Now().UTC())
+	if body == "" {
+		t.Fatal("Build returned empty body for normalized active status")
+	}
+}
+
 func TestParseVLESSLinksAcceptsBase64Subscription(t *testing.T) {
 	raw := "vless://00000000-0000-4000-8000-000000000001@example.com:443?encryption=none&type=ws&security=tls&path=%2Fv2ray&host=example.com#legacy"
 	encoded := base64.StdEncoding.EncodeToString([]byte(raw + "\n"))

@@ -7,19 +7,34 @@ import (
 )
 
 func TestAccessTokenRoundTrip(t *testing.T) {
-	token, err := CreateAccessToken("admin@example.com", "test-secret-key", time.Minute)
+	token, err := CreateAccessToken(AccessClaims{
+		Subject: PrincipalSubjectConfiguredAdmin,
+		Role:    PrincipalTypeAdmin,
+	}, "test-secret-key", time.Minute)
 	if err != nil {
 		t.Fatalf("CreateAccessToken() error = %v", err)
 	}
-	subject, ok := VerifyAccessToken(token, "test-secret-key")
+	claims, ok := VerifyAccessToken(token, "test-secret-key")
 	if !ok {
 		t.Fatal("VerifyAccessToken() rejected valid token")
 	}
-	if subject != "admin@example.com" {
-		t.Fatalf("subject = %q", subject)
+	if claims.Subject != PrincipalSubjectConfiguredAdmin {
+		t.Fatalf("subject = %q", claims.Subject)
+	}
+	if claims.Role != PrincipalTypeAdmin {
+		t.Fatalf("role = %q", claims.Role)
 	}
 	if _, ok := VerifyAccessToken(token, "wrong-secret"); ok {
 		t.Fatal("VerifyAccessToken() accepted wrong secret")
+	}
+}
+
+func TestAdminAccessTokenRequiresConfiguredSubject(t *testing.T) {
+	if _, err := CreateAccessToken(AccessClaims{
+		Subject: "admin@example.com",
+		Role:    PrincipalTypeAdmin,
+	}, "test-secret-key", time.Minute); err == nil {
+		t.Fatal("CreateAccessToken accepted admin token with email subject")
 	}
 }
 
@@ -46,6 +61,22 @@ func TestTokenDigest(t *testing.T) {
 	}
 	if digest != TokenDigest("token") {
 		t.Fatal("digest is not stable")
+	}
+}
+
+func TestAuthSessionVersionChangesWithInputs(t *testing.T) {
+	version := AuthSessionVersion("secret-key", "admin", "admin@example.com", "password", "epoch-1")
+	if version == "" {
+		t.Fatal("AuthSessionVersion returned empty version")
+	}
+	if version != AuthSessionVersion("secret-key", "admin", "admin@example.com", "password", "epoch-1") {
+		t.Fatal("AuthSessionVersion is not stable")
+	}
+	if version == AuthSessionVersion("secret-key", "admin", "admin@example.com", "password", "epoch-2") {
+		t.Fatal("AuthSessionVersion did not change when epoch changed")
+	}
+	if version == AuthSessionVersion("other-secret", "admin", "admin@example.com", "password", "epoch-1") {
+		t.Fatal("AuthSessionVersion did not change when secret changed")
 	}
 }
 

@@ -5,6 +5,15 @@ import (
 	"testing"
 )
 
+func TestCustomerStatusNormalization(t *testing.T) {
+	if got := CustomerStatusOrDefault(" Active "); got != CustomerStatusActive {
+		t.Fatalf("CustomerStatusOrDefault() = %q, want %q", got, CustomerStatusActive)
+	}
+	if !CustomerStatusIsActive("ACTIVE") {
+		t.Fatal("CustomerStatusIsActive rejected uppercase active status")
+	}
+}
+
 func TestTrafficUsageMarshalIncludesGBFields(t *testing.T) {
 	usage := TrafficUsage{
 		UploadBytes:   1500 * 1000 * 1000,

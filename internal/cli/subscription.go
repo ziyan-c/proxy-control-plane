@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/ziyan-c/proxy-control-plane/internal/config"
 	"github.com/ziyan-c/proxy-control-plane/internal/domain"
 	"github.com/ziyan-c/proxy-control-plane/internal/security"
 )
@@ -104,6 +105,9 @@ func runSubscriptionTokenEnsure(cmd *cobra.Command, rootOpts *Options, serviceOp
 		return err
 	}
 	defer st.Close()
+	if err := requireDatabaseEncryptionKey(cfg); err != nil {
+		return err
+	}
 
 	customerID := opts.customerID
 	if opts.customerEmail != "" {
@@ -180,8 +184,8 @@ func runSubscriptionTokenEncrypt(cmd *cobra.Command, rootOpts *Options, serviceO
 		return err
 	}
 	defer st.Close()
-	if strings.TrimSpace(cfg.DatabaseEncryptionKey) == "" {
-		return fmt.Errorf("PCP_DATABASE_ENCRYPTION_KEY is required")
+	if err := requireDatabaseEncryptionKey(cfg); err != nil {
+		return err
 	}
 
 	token, err := st.GetSubscriptionToken(ctx, opts.tokenID)
@@ -200,6 +204,16 @@ func runSubscriptionTokenEncrypt(cmd *cobra.Command, rootOpts *Options, serviceO
 		return err
 	}
 	fmt.Fprintf(os.Stdout, "subscription token encrypted: id=%s\n", opts.tokenID)
+	return nil
+}
+
+func requireDatabaseEncryptionKey(cfg config.Config) error {
+	if strings.TrimSpace(cfg.DatabaseEncryptionKey) == "" {
+		return fmt.Errorf("PCP_DATABASE_ENCRYPTION_KEY is required; generate one with openssl rand -base64 32 and set it in .local/app.env")
+	}
+	if _, err := security.ParseDatabaseEncryptionKey(cfg.DatabaseEncryptionKey); err != nil {
+		return fmt.Errorf("PCP_DATABASE_ENCRYPTION_KEY %w", err)
+	}
 	return nil
 }
 

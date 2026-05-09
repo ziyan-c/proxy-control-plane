@@ -10,7 +10,7 @@ import (
 )
 
 func Build(customer domain.Customer, accounts []domain.ProxyAccount, fmt string, now time.Time) string {
-	if customer.Status != "active" || !isActive(customer.ExpiresAt, now) {
+	if !domain.CustomerStatusIsActive(customer.Status) || !isActive(customer.ExpiresAt, now) {
 		return ""
 	}
 

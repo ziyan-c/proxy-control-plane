@@ -17,7 +17,7 @@ node-side config delivery should be owned by separate infrastructure tooling.
 - Manages customers, proxy nodes, proxy accounts, and account-to-node bindings
 - Creates and rotates subscription tokens while storing only token hashes
 - Generates VLESS subscription output in base64 or raw URI format
-- Provides admin login and Bearer-token protected management APIs
+- Provides admin/customer login with access-token and refresh-token sessions
 - Records admin audit logs
 - Collects Xray user traffic through StatsService for future quota and plan enforcement
 - Optionally reconciles managed Xray runtime users through the Xray gRPC API
@@ -273,7 +273,7 @@ internal/cli/             Cobra commands and local config bootstrap
 internal/config/          Environment-based configuration loading
 internal/domain/          Core business models
 internal/httpapi/         Gin API, auth middleware, handlers, and responses
-internal/security/        Admin tokens, subscription tokens, password checks, hashes
+internal/security/        Auth tokens, subscription tokens, password checks, hashes
 internal/store/           GORM PostgreSQL access and migrations
 internal/subscription/    VLESS subscription generation
 internal/trafficsync/     Xray StatsService traffic collection
@@ -306,8 +306,11 @@ PCP_LISTEN_ADDR=0.0.0.0:9710
 PCP_DATABASE_URL=postgres://user:password@host:5432/proxy_control?sslmode=require
 PCP_ADMIN_EMAIL=admin@proxy.example
 PCP_ADMIN_PASSWORD=change-this-to-a-long-admin-password
+PCP_ADMIN_SESSION_EPOCH=
 PCP_SECRET_KEY=change-this-with-openssl-rand-base64-32-before-serving
-PCP_DATABASE_ENCRYPTION_KEY=base64-encoded-32-byte-key
+PCP_DATABASE_ENCRYPTION_KEY=ZXhhbXBsZS1kYXRhYmFzZS1lbmNyeXB0aW9uLWtleSE=
+PCP_ACCESS_TOKEN_EXPIRE_MINUTES=30
+PCP_REFRESH_TOKEN_EXPIRE_HOURS=360
 PCP_AUTO_CREATE_DATABASE=true
 PCP_AUTO_MIGRATE=false
 PCP_RUNTIME_SYNC_ENABLED=false
@@ -323,6 +326,7 @@ PCP_MAINTENANCE_CLEANUP_INTERVAL=24h
 PCP_MAINTENANCE_TRAFFIC_RETENTION=7d
 PCP_MAINTENANCE_TRAFFIC_DAILY_RETENTION=30d
 PCP_MAINTENANCE_DOMAIN_ACCESS_RETENTION=30d
+PCP_MAINTENANCE_AUTH_REFRESH_RETENTION=30d
 PCP_MAINTENANCE_AUDIT_RETENTION=90d
 ```
 
@@ -333,16 +337,36 @@ structure during startup. Use `./proxy-control-plane db migrate` for schema
 changes. `PCP_AUTO_MIGRATE=true` is only a development shortcut when you
 intentionally want the server to run GORM `AutoMigrate` before serving.
 The server refuses to start with the example admin email, placeholder admin
-password, placeholder secret key, a password shorter than 12 characters, or a
-secret key shorter than 32 characters.
+password, placeholder secret key, a password shorter than 12 characters, a
+secret key shorter than 32 characters, or a missing/invalid
+`PCP_DATABASE_ENCRYPTION_KEY`.
 
-`PCP_DATABASE_ENCRYPTION_KEY` is optional but recommended. It must be a
-base64-encoded 32-byte key, for example from `openssl rand -base64 32`. When it
-is set, new subscription tokens are still verified by `token_hash`, but the
-plain token is also stored as an AES-256-GCM encrypted database column so a
-future customer app can show the saved subscription URL after login. Existing
-hash-only tokens continue to work, but their plaintext cannot be recovered
-unless they are rotated or recreated.
+Admin and customer logins return a short-lived access token plus a long-lived
+refresh token. The access token TTL is controlled by
+`PCP_ACCESS_TOKEN_EXPIRE_MINUTES`; the default access-token TTL is 30 minutes.
+The refresh token TTL is controlled by
+`PCP_REFRESH_TOKEN_EXPIRE_HOURS`. The default refresh window is 15 days.
+Refresh tokens are random 32-byte values, and
+only their SHA-256 hashes are stored in PostgreSQL. Every refresh rotates the
+refresh token and revokes the previous one.
+Admin refresh tokens are also bound to an internal session version derived from
+the admin email, admin password, `PCP_SECRET_KEY`, and optional
+`PCP_ADMIN_SESSION_EPOCH`. Changing any of those values invalidates existing
+admin refresh tokens; changing only `PCP_ADMIN_SESSION_EPOCH` is a simple way to
+force all admin sessions to log in again.
+Customer refresh tokens are bound to the customer id, email, password hash, and
+hidden `session_epoch`. Changing a customer's email, password, status, expiry,
+or PATCHing `{"reset_sessions":true}` invalidates that customer's existing
+refresh tokens.
+
+`PCP_DATABASE_ENCRYPTION_KEY` is required in server mode. It must be a
+base64-encoded 32-byte key, for example from `openssl rand -base64 32`. New
+subscription tokens are still verified by `token_hash`, but the plain token is
+also stored as an AES-256-GCM encrypted database column so a future customer app
+can show the saved subscription URL after login. Existing hash-only tokens
+continue to work, but their plaintext cannot be recovered unless they are
+rotated or recreated. The example value above is deliberately fake; replace it
+in `.local/app.env` before any real deployment.
 
 Runtime sync is disabled by default. Enable `PCP_RUNTIME_SYNC_ENABLED=true`
 after Ansible has registered Xray nodes with runtime API fields. The sync loop
@@ -367,6 +391,7 @@ interval is 24 hours. The retention defaults are:
 - `traffic_usage`: 7 days
 - `traffic_usage_daily`: 30 days
 - `domain_access_logs`: 30 days
+- `auth_refresh_tokens`: 30 days after expiry or revocation
 - `audit_logs`: 90 days
 
 Runtime precedence is:
@@ -552,8 +577,9 @@ you enable it.
 
 The write path runs in one database transaction. It first aggregates old
 `traffic_usage` rows older than the detail retention into `traffic_usage_daily`,
-then deletes those detail rows. It also deletes `traffic_usage_daily` rows older
-than the daily retention and `audit_logs` older than the audit retention.
+then deletes those detail rows. It also deletes `traffic_usage_daily`,
+`domain_access_logs`, `auth_refresh_tokens`, and `audit_logs` after their
+configured retention windows.
 PostgreSQL may keep physical files allocated after deletes; the space is still
 reusable by future writes.
 
@@ -563,9 +589,20 @@ Health:
 
 - `GET /health`
 
+Auth:
+
+- `POST /auth/refresh`
+- `POST /auth/logout`
+
 Admin:
 
 - `POST /admin/login`
+
+Customer login:
+
+- `POST /customer/login`
+- `GET /customer/me`
+- `GET /customer/subscription-tokens`
 
 Customers:
 
@@ -612,11 +649,37 @@ Client subscription:
 - `GET /sub/{token}` or `GET /sub/{token}?fmt=base64` returns base64 VLESS subscription content
 - `GET /sub/{token}?fmt=raw` returns raw VLESS URI text
 
-All admin endpoints except `/health`, `/admin/login`, and `/sub/{token}` require:
+`POST /admin/login` and `POST /customer/login` return:
+
+```json
+{
+  "access_token": "...",
+  "refresh_token": "...",
+  "token_type": "bearer",
+  "expires_in": 1800,
+  "refresh_token_expires_at": "2026-06-08T12:00:00Z",
+  "principal": {
+    "type": "admin",
+    "email": "admin@proxy.example"
+  }
+}
+```
+
+`POST /auth/refresh` accepts `{"refresh_token":"..."}` and returns a new access
+token plus a new refresh token. `POST /auth/logout` accepts the same body and
+revokes that refresh token.
+
+Admin endpoints require an access token with the `admin` role. Customer
+endpoints require an access token with the `customer` role:
 
 ```text
 Authorization: Bearer <access_token>
 ```
+
+Access-token JWT payloads are intentionally minimal. Admin tokens use
+`sub=configured-admin`; customer tokens use `sub=<customers.id>`. Customer and
+admin emails are returned in the login response `principal` object for display,
+but they are not embedded in the JWT.
 
 ## Database Tables
 
@@ -625,6 +688,7 @@ Authorization: Bearer <access_token>
 - `proxy_accounts`
 - `proxy_account_nodes`
 - `subscription_tokens`
+- `auth_refresh_tokens`
 - `traffic_usage`
 - `traffic_usage_daily`
 - `audit_logs`

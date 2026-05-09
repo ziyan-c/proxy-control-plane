@@ -39,7 +39,10 @@ func New(cfg config.Config, st *store.Store) http.Handler {
 
 func (s *Server) routes(router *gin.Engine) {
 	router.GET("/health", s.health)
+	router.POST("/auth/refresh", s.refreshAuth)
+	router.POST("/auth/logout", s.logoutAuth)
 	router.POST("/admin/login", s.login)
+	router.POST("/customer/login", s.customerLogin)
 	router.GET("/sub/:token", s.getSubscription)
 
 	admin := router.Group("/admin", s.requireAdmin())
@@ -72,6 +75,10 @@ func (s *Server) routes(router *gin.Engine) {
 	admin.GET("/domain-access-logs", s.listDomainAccessLogs)
 	admin.POST("/domain-access-logs", s.recordDomainAccessLogs)
 	admin.GET("/domain-access-summary", s.summarizeDomainAccessLogs)
+
+	customer := router.Group("/customer", s.requireCustomer())
+	customer.GET("/me", s.customerMe)
+	customer.GET("/subscription-tokens", s.customerSubscriptionTokens)
 }
 
 func redactingGinLogFormatter(param gin.LogFormatterParams) string {
@@ -123,6 +130,26 @@ type loginRequest struct {
 	Password string `json:"password"`
 }
 
+type refreshRequest struct {
+	RefreshToken string `json:"refresh_token"`
+}
+
+type authPrincipalResponse struct {
+	Type           string `json:"type"`
+	Email          string `json:"email"`
+	CustomerID     string `json:"customer_id,omitempty"`
+	SessionVersion string `json:"-"`
+}
+
+type authResponse struct {
+	AccessToken           string                `json:"access_token"`
+	RefreshToken          string                `json:"refresh_token"`
+	TokenType             string                `json:"token_type"`
+	ExpiresIn             int64                 `json:"expires_in"`
+	RefreshTokenExpiresAt time.Time             `json:"refresh_token_expires_at"`
+	Principal             authPrincipalResponse `json:"principal"`
+}
+
 func (s *Server) login(c *gin.Context) {
 	var req loginRequest
 	if !bindJSON(c, &req) {
@@ -132,12 +159,225 @@ func (s *Server) login(c *gin.Context) {
 		writeError(c, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
-	token, err := security.CreateAccessToken(req.Email, s.cfg.SecretKey, s.cfg.AccessTokenTTL())
+
+	resp, err := s.issueAuthTokens(c, security.PrincipalTypeAdmin, "", req.Email, s.adminSessionVersion())
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "could not create auth tokens")
+		return
+	}
+	c.Set("actor", security.PrincipalTypeAdmin+":"+req.Email)
+	s.audit(c, "auth.admin_login", req.Email)
+	c.JSON(http.StatusOK, resp)
+}
+
+func (s *Server) customerLogin(c *gin.Context) {
+	var req loginRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	customer, err := s.store.GetCustomerByEmail(c.Request.Context(), req.Email)
+	if errors.Is(err, store.ErrNotFound) || err == nil && !customerCanLogin(customer, time.Now().UTC()) {
+		writeError(c, http.StatusUnauthorized, "invalid credentials")
+		return
+	}
+	if handleStoreError(c, err) {
+		return
+	}
+	if customer.PasswordHash == "" || !security.VerifyPassword(req.Password, customer.PasswordHash) {
+		writeError(c, http.StatusUnauthorized, "invalid credentials")
+		return
+	}
+
+	resp, err := s.issueAuthTokens(c, security.PrincipalTypeCustomer, customer.ID, customer.Email, s.customerSessionVersion(customer))
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "could not create auth tokens")
+		return
+	}
+	c.Set("actor", security.PrincipalTypeCustomer+":"+customer.ID)
+	s.audit(c, "auth.customer_login", customer.ID)
+	c.JSON(http.StatusOK, resp)
+}
+
+func (s *Server) refreshAuth(c *gin.Context) {
+	var req refreshRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	req.RefreshToken = strings.TrimSpace(req.RefreshToken)
+	if req.RefreshToken == "" {
+		writeError(c, http.StatusBadRequest, "refresh_token is required")
+		return
+	}
+
+	current, err := s.store.GetAuthRefreshTokenByHash(c.Request.Context(), security.TokenDigest(req.RefreshToken))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(c, http.StatusUnauthorized, "invalid refresh token")
+		return
+	}
+	if handleStoreError(c, err) {
+		return
+	}
+	principal, ok := s.refreshPrincipal(c, current)
+	if !ok {
+		return
+	}
+
+	rawRefresh, err := security.NewRandomToken()
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "could not create refresh token")
+		return
+	}
+	refreshExpiresAt := time.Now().UTC().Add(s.cfg.RefreshTokenTTL())
+	next := domain.AuthRefreshToken{
+		PrincipalType:     principal.Type,
+		Subject:           authSubject(principal.Type, principal.CustomerID),
+		SessionVersion:    principal.SessionVersion,
+		TokenHash:         security.TokenDigest(rawRefresh),
+		Enabled:           true,
+		ExpiresAt:         refreshExpiresAt,
+		LastUsedIP:        clientIP(c),
+		LastUsedUserAgent: c.Request.UserAgent(),
+	}
+	if principal.CustomerID != "" {
+		customerID := principal.CustomerID
+		next.CustomerID = &customerID
+	}
+	next, err = s.store.RotateAuthRefreshToken(c.Request.Context(), current.ID, next, time.Now().UTC(), clientIP(c), c.Request.UserAgent())
+	if errors.Is(err, store.ErrInvalid) {
+		writeError(c, http.StatusUnauthorized, "invalid refresh token")
+		return
+	}
+	if handleStoreError(c, err) {
+		return
+	}
+
+	resp, err := s.authResponse(principal.Type, principal.CustomerID, principal.Email, rawRefresh, next.ExpiresAt)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "could not create access token")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"access_token": token, "token_type": "bearer"})
+	c.JSON(http.StatusOK, resp)
+}
+
+func (s *Server) logoutAuth(c *gin.Context) {
+	var req refreshRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	req.RefreshToken = strings.TrimSpace(req.RefreshToken)
+	if req.RefreshToken == "" {
+		writeError(c, http.StatusBadRequest, "refresh_token is required")
+		return
+	}
+	if err := s.store.RevokeAuthRefreshTokenByHash(c.Request.Context(), security.TokenDigest(req.RefreshToken), time.Now().UTC(), clientIP(c), c.Request.UserAgent()); handleStoreError(c, err) {
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func (s *Server) issueAuthTokens(c *gin.Context, principalType string, customerID string, email string, sessionVersion string) (authResponse, error) {
+	rawRefresh, err := security.NewRandomToken()
+	if err != nil {
+		return authResponse{}, err
+	}
+	refreshExpiresAt := time.Now().UTC().Add(s.cfg.RefreshTokenTTL())
+	token := domain.AuthRefreshToken{
+		PrincipalType:     principalType,
+		Subject:           authSubject(principalType, customerID),
+		SessionVersion:    sessionVersion,
+		TokenHash:         security.TokenDigest(rawRefresh),
+		Enabled:           true,
+		ExpiresAt:         refreshExpiresAt,
+		LastUsedIP:        clientIP(c),
+		LastUsedUserAgent: c.Request.UserAgent(),
+	}
+	if customerID != "" {
+		token.CustomerID = &customerID
+	}
+	token, err = s.store.CreateAuthRefreshToken(c.Request.Context(), token)
+	if err != nil {
+		return authResponse{}, err
+	}
+	return s.authResponse(principalType, customerID, email, rawRefresh, token.ExpiresAt)
+}
+
+func (s *Server) authResponse(principalType string, customerID string, email string, refreshToken string, refreshExpiresAt time.Time) (authResponse, error) {
+	accessToken, err := security.CreateAccessToken(security.AccessClaims{
+		Subject: authSubject(principalType, customerID),
+		Role:    principalType,
+	}, s.cfg.SecretKey, s.cfg.AccessTokenTTL())
+	if err != nil {
+		return authResponse{}, err
+	}
+	return authResponse{
+		AccessToken:           accessToken,
+		RefreshToken:          refreshToken,
+		TokenType:             "bearer",
+		ExpiresIn:             int64(s.cfg.AccessTokenTTL().Seconds()),
+		RefreshTokenExpiresAt: refreshExpiresAt.UTC(),
+		Principal: authPrincipalResponse{
+			Type:       principalType,
+			Email:      email,
+			CustomerID: customerID,
+		},
+	}, nil
+}
+
+func (s *Server) refreshPrincipal(c *gin.Context, token domain.AuthRefreshToken) (authPrincipalResponse, bool) {
+	now := time.Now().UTC()
+	if !token.Enabled || token.RevokedAt != nil || !token.ExpiresAt.After(now) {
+		writeError(c, http.StatusUnauthorized, "invalid refresh token")
+		return authPrincipalResponse{}, false
+	}
+	switch token.PrincipalType {
+	case security.PrincipalTypeAdmin:
+		if token.Subject != security.PrincipalSubjectConfiguredAdmin || token.SessionVersion != s.adminSessionVersion() {
+			writeError(c, http.StatusUnauthorized, "invalid refresh token")
+			return authPrincipalResponse{}, false
+		}
+		return authPrincipalResponse{Type: security.PrincipalTypeAdmin, Email: s.cfg.AdminEmail, SessionVersion: token.SessionVersion}, true
+	case security.PrincipalTypeCustomer:
+		if token.CustomerID == nil || token.Subject != *token.CustomerID {
+			writeError(c, http.StatusUnauthorized, "invalid refresh token")
+			return authPrincipalResponse{}, false
+		}
+		customer, err := s.store.GetCustomer(c.Request.Context(), *token.CustomerID)
+		if errors.Is(err, store.ErrNotFound) || err == nil && (!customerCanLogin(customer, now) || customer.PasswordHash == "") {
+			writeError(c, http.StatusUnauthorized, "invalid refresh token")
+			return authPrincipalResponse{}, false
+		}
+		if handleStoreError(c, err) {
+			return authPrincipalResponse{}, false
+		}
+		sessionVersion := s.customerSessionVersion(customer)
+		if token.SessionVersion != sessionVersion {
+			writeError(c, http.StatusUnauthorized, "invalid refresh token")
+			return authPrincipalResponse{}, false
+		}
+		return authPrincipalResponse{Type: security.PrincipalTypeCustomer, Email: customer.Email, CustomerID: customer.ID, SessionVersion: sessionVersion}, true
+	default:
+		writeError(c, http.StatusUnauthorized, "invalid refresh token")
+		return authPrincipalResponse{}, false
+	}
+}
+
+func customerCanLogin(customer domain.Customer, now time.Time) bool {
+	return domain.CustomerStatusIsActive(customer.Status) && (customer.ExpiresAt == nil || customer.ExpiresAt.After(now))
+}
+
+func authSubject(principalType string, customerID string) string {
+	if principalType == security.PrincipalTypeAdmin {
+		return security.PrincipalSubjectConfiguredAdmin
+	}
+	return customerID
+}
+
+func (s *Server) adminSessionVersion() string {
+	return security.AuthSessionVersion(s.cfg.SecretKey, "admin", s.cfg.AdminEmail, s.cfg.AdminPassword, s.cfg.AdminSessionEpoch)
+}
+
+func (s *Server) customerSessionVersion(customer domain.Customer) string {
+	return security.AuthSessionVersion(s.cfg.SecretKey, "customer", customer.ID, customer.Email, customer.PasswordHash, customer.SessionEpoch)
 }
 
 type customerRequest struct {
@@ -145,6 +385,7 @@ type customerRequest struct {
 	DisplayName string     `json:"display_name"`
 	Status      string     `json:"status"`
 	ExpiresAt   *time.Time `json:"expires_at"`
+	Password    string     `json:"password"`
 }
 
 func (s *Server) createCustomer(c *gin.Context) {
@@ -156,14 +397,16 @@ func (s *Server) createCustomer(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "email is required")
 		return
 	}
-	if req.Status == "" {
-		req.Status = "active"
+	passwordHash, ok := passwordHashFromRequest(c, req.Password, true)
+	if !ok {
+		return
 	}
 	customer, err := s.store.CreateCustomer(c.Request.Context(), domain.Customer{
-		Email:       req.Email,
-		DisplayName: req.DisplayName,
-		Status:      req.Status,
-		ExpiresAt:   req.ExpiresAt,
+		Email:        req.Email,
+		DisplayName:  req.DisplayName,
+		Status:       domain.CustomerStatusOrDefault(req.Status),
+		ExpiresAt:    req.ExpiresAt,
+		PasswordHash: passwordHash,
 	})
 	if handleStoreError(c, err) {
 		return
@@ -197,6 +440,12 @@ func (s *Server) updateCustomer(c *gin.Context) {
 	if !ok {
 		return
 	}
+	now := time.Now().UTC()
+	oldLoginEnabled := customerCanLogin(current, now) && current.PasswordHash != ""
+	_, emailChanged := fields["email"]
+	_, passwordChanged := fields["password"]
+	_, statusChanged := fields["status"]
+	_, expiresAtChanged := fields["expires_at"]
 	if !patchString(c, fields, "email", &current.Email, false, true) {
 		return
 	}
@@ -209,9 +458,22 @@ func (s *Server) updateCustomer(c *gin.Context) {
 	if !patchOptionalTime(c, fields, "expires_at", &current.ExpiresAt) {
 		return
 	}
+	if !patchCustomerPassword(c, fields, &current) {
+		return
+	}
+	resetSessions, ok := patchCustomerSessionReset(c, fields, &current)
+	if !ok {
+		return
+	}
 	updated, err := s.store.UpdateCustomer(c.Request.Context(), current)
 	if handleStoreError(c, err) {
 		return
+	}
+	newLoginEnabled := customerCanLogin(updated, now) && updated.PasswordHash != ""
+	if emailChanged || passwordChanged || statusChanged || expiresAtChanged || resetSessions || (oldLoginEnabled && !newLoginEnabled) {
+		if _, err := s.store.RevokeCustomerAuthRefreshTokens(c.Request.Context(), updated.ID, now, clientIP(c), c.Request.UserAgent()); handleStoreError(c, err) {
+			return
+		}
 	}
 	s.audit(c, "customer.updated", updated.ID)
 	c.JSON(http.StatusOK, updated)
@@ -223,6 +485,54 @@ func (s *Server) deleteCustomer(c *gin.Context) {
 	}
 	s.audit(c, "customer.deleted", c.Param("id"))
 	c.Status(http.StatusNoContent)
+}
+
+func (s *Server) customerMe(c *gin.Context) {
+	customerID, ok := customerIDFromContext(c)
+	if !ok {
+		writeError(c, http.StatusUnauthorized, "invalid bearer token")
+		return
+	}
+	customer, err := s.store.GetCustomer(c.Request.Context(), customerID)
+	if handleStoreError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, customer)
+}
+
+func (s *Server) customerSubscriptionTokens(c *gin.Context) {
+	customerID, ok := customerIDFromContext(c)
+	if !ok {
+		writeError(c, http.StatusUnauthorized, "invalid bearer token")
+		return
+	}
+	tokens, err := s.store.ListSubscriptionTokens(c.Request.Context(), customerID)
+	if handleStoreError(c, err) {
+		return
+	}
+	now := time.Now().UTC()
+	active := make([]domain.SubscriptionToken, 0, len(tokens))
+	for i := range tokens {
+		if !activeSubscriptionToken(tokens[i], now) {
+			continue
+		}
+		if tokens[i].EncryptedToken == "" {
+			active = append(active, tokens[i])
+			continue
+		}
+		plain, err := security.DecryptStringWithBase64Key(s.cfg.DatabaseEncryptionKey, tokens[i].EncryptedToken)
+		if err != nil {
+			writeError(c, http.StatusInternalServerError, "could not decrypt subscription token")
+			return
+		}
+		tokens[i].PlainToken = plain
+		active = append(active, tokens[i])
+	}
+	c.JSON(http.StatusOK, active)
+}
+
+func activeSubscriptionToken(token domain.SubscriptionToken, now time.Time) bool {
+	return token.Enabled && (token.ExpiresAt == nil || token.ExpiresAt.After(now))
 }
 
 type nodeRequest struct {
@@ -950,6 +1260,14 @@ func subscriptionFormat(c *gin.Context) (string, bool) {
 }
 
 func (s *Server) requireAdmin() gin.HandlerFunc {
+	return s.requireRole(security.PrincipalTypeAdmin)
+}
+
+func (s *Server) requireCustomer() gin.HandlerFunc {
+	return s.requireRole(security.PrincipalTypeCustomer)
+}
+
+func (s *Server) requireRole(role string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.GetHeader("Authorization")
 		if !strings.HasPrefix(header, "Bearer ") {
@@ -957,13 +1275,19 @@ func (s *Server) requireAdmin() gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		subject, ok := security.VerifyAccessToken(strings.TrimSpace(strings.TrimPrefix(header, "Bearer ")), s.cfg.SecretKey)
+		claims, ok := security.VerifyAccessToken(strings.TrimSpace(strings.TrimPrefix(header, "Bearer ")), s.cfg.SecretKey)
 		if !ok {
 			writeError(c, http.StatusUnauthorized, "invalid bearer token")
 			c.Abort()
 			return
 		}
-		c.Set("actor", subject)
+		if claims.Role != role {
+			writeError(c, http.StatusForbidden, "forbidden")
+			c.Abort()
+			return
+		}
+		c.Set("auth_claims", claims)
+		c.Set("actor", claims.Actor())
 		c.Next()
 	}
 }
@@ -978,6 +1302,23 @@ func actorFromContext(c *gin.Context) string {
 		return value
 	}
 	return ""
+}
+
+func claimsFromContext(c *gin.Context) (security.AccessClaims, bool) {
+	value, exists := c.Get("auth_claims")
+	if !exists {
+		return security.AccessClaims{}, false
+	}
+	claims, ok := value.(security.AccessClaims)
+	return claims, ok
+}
+
+func customerIDFromContext(c *gin.Context) (string, bool) {
+	claims, ok := claimsFromContext(c)
+	if !ok || claims.Role != security.PrincipalTypeCustomer || strings.TrimSpace(claims.Subject) == "" {
+		return "", false
+	}
+	return claims.Subject, true
 }
 
 func applyNodePatch(c *gin.Context, node *domain.ProxyNode, fields map[string]json.RawMessage) bool {
@@ -1134,6 +1475,72 @@ func handleStoreError(c *gin.Context, err error) bool {
 	}
 	writeError(c, http.StatusInternalServerError, "internal server error")
 	return true
+}
+
+func passwordHashFromRequest(c *gin.Context, password string, allowEmpty bool) (string, bool) {
+	if password == "" {
+		if allowEmpty {
+			return "", true
+		}
+		writeError(c, http.StatusBadRequest, "password is required")
+		return "", false
+	}
+	if len(password) < 8 {
+		writeError(c, http.StatusBadRequest, "password must contain at least 8 characters")
+		return "", false
+	}
+	hash, err := security.PasswordHash(password)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "could not hash password")
+		return "", false
+	}
+	return hash, true
+}
+
+func patchCustomerPassword(c *gin.Context, fields map[string]json.RawMessage, customer *domain.Customer) bool {
+	raw, exists := fields["password"]
+	if !exists {
+		return true
+	}
+	if jsonNull(raw) {
+		customer.PasswordHash = ""
+		return true
+	}
+	var password string
+	if !decodePatchValue(c, "password", raw, &password) {
+		return false
+	}
+	hash, ok := passwordHashFromRequest(c, password, false)
+	if !ok {
+		return false
+	}
+	customer.PasswordHash = hash
+	return true
+}
+
+func patchCustomerSessionReset(c *gin.Context, fields map[string]json.RawMessage, customer *domain.Customer) (bool, bool) {
+	raw, exists := fields["reset_sessions"]
+	if !exists {
+		return false, true
+	}
+	if jsonNull(raw) {
+		writeError(c, http.StatusBadRequest, "reset_sessions cannot be null")
+		return false, false
+	}
+	var reset bool
+	if !decodePatchValue(c, "reset_sessions", raw, &reset) {
+		return false, false
+	}
+	if !reset {
+		return false, true
+	}
+	epoch, err := security.NewRandomToken()
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "could not reset sessions")
+		return false, false
+	}
+	customer.SessionEpoch = epoch
+	return true, true
 }
 
 func patchString(c *gin.Context, fields map[string]json.RawMessage, name string, target *string, nullable bool, nonEmpty bool) bool {

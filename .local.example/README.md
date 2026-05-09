@@ -26,18 +26,23 @@ Then edit:
 .local/app.env
 ```
 
-Use strong values for `PCP_ADMIN_EMAIL`, `PCP_ADMIN_PASSWORD`, and
-`PCP_SECRET_KEY` before serving. The server refuses to start with the example
-admin email, placeholder password, placeholder secret key, passwords shorter
-than 12 characters, or secret keys shorter than 32 characters.
+Use strong values for `PCP_ADMIN_EMAIL`, `PCP_ADMIN_PASSWORD`,
+`PCP_SECRET_KEY`, and `PCP_DATABASE_ENCRYPTION_KEY` before serving. The server
+refuses to start with the example admin email, placeholder password,
+placeholder secret key, passwords shorter than 12 characters, secret keys
+shorter than 32 characters, or a missing/invalid database encryption key.
 
-Set `PCP_DATABASE_ENCRYPTION_KEY` to a base64-encoded 32-byte key when you want
-new sensitive database columns, such as stored subscription tokens, encrypted at
-rest while still being recoverable by the application:
+Set `PCP_DATABASE_ENCRYPTION_KEY` to a base64-encoded 32-byte key so new
+sensitive database columns, such as stored subscription tokens, are encrypted
+at rest while still being recoverable by the application:
 
 ```bash
 openssl rand -base64 32
 ```
+
+The key in `.local.example/app.env` is deliberately fake and only exists so the
+example file is syntactically complete. Replace it in `.local/app.env` before
+serving real traffic.
 
 `PCP_AUTO_MIGRATE=false` keeps server startup from changing table structure.
 Run the versioned SQL migrations explicitly with:

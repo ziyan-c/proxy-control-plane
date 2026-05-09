@@ -15,6 +15,7 @@ import (
 	"github.com/ziyan-c/proxy-control-plane/internal/security"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 )
 
@@ -156,10 +157,8 @@ func (s *Store) CreateCustomer(ctx context.Context, customer domain.Customer) (d
 			return domain.Customer{}, err
 		}
 	}
-	if customer.Status == "" {
-		customer.Status = "active"
-	}
-	if err := s.db.WithContext(ctx).Omit("ProxyAccounts", "SubscriptionTokens").Create(&customer).Error; err != nil {
+	customer.Status = domain.CustomerStatusOrDefault(customer.Status)
+	if err := s.db.WithContext(ctx).Omit("ProxyAccounts", "SubscriptionTokens", "AuthRefreshTokens").Create(&customer).Error; err != nil {
 		return domain.Customer{}, mapGormError(err)
 	}
 	return customer, nil
@@ -193,7 +192,8 @@ func (s *Store) UpdateCustomer(ctx context.Context, customer domain.Customer) (d
 	if _, err := s.GetCustomer(ctx, customer.ID); err != nil {
 		return domain.Customer{}, err
 	}
-	if err := s.db.WithContext(ctx).Omit("ProxyAccounts", "SubscriptionTokens").Save(&customer).Error; err != nil {
+	customer.Status = domain.CustomerStatusOrDefault(customer.Status)
+	if err := s.db.WithContext(ctx).Omit("ProxyAccounts", "SubscriptionTokens", "AuthRefreshTokens").Save(&customer).Error; err != nil {
 		return domain.Customer{}, mapGormError(err)
 	}
 	return s.GetCustomer(ctx, customer.ID)
@@ -201,6 +201,159 @@ func (s *Store) UpdateCustomer(ctx context.Context, customer domain.Customer) (d
 
 func (s *Store) DeleteCustomer(ctx context.Context, id string) error {
 	return deleteByID(ctx, s.db, &domain.Customer{}, id)
+}
+
+func (s *Store) CreateAuthRefreshToken(ctx context.Context, token domain.AuthRefreshToken) (domain.AuthRefreshToken, error) {
+	var err error
+	if token.ID == "" {
+		token.ID, err = security.NewID()
+		if err != nil {
+			return domain.AuthRefreshToken{}, err
+		}
+	}
+	if token.PrincipalType == "" || token.Subject == "" || token.SessionVersion == "" || token.TokenHash == "" || token.ExpiresAt.IsZero() {
+		return domain.AuthRefreshToken{}, ErrInvalid
+	}
+	if token.PrincipalType != security.PrincipalTypeAdmin && token.PrincipalType != security.PrincipalTypeCustomer {
+		return domain.AuthRefreshToken{}, ErrInvalid
+	}
+	if token.PrincipalType == security.PrincipalTypeCustomer && token.CustomerID == nil {
+		return domain.AuthRefreshToken{}, ErrInvalid
+	}
+	if token.PrincipalType == security.PrincipalTypeAdmin && token.CustomerID != nil {
+		return domain.AuthRefreshToken{}, ErrInvalid
+	}
+	token.Enabled = true
+	if err := s.db.WithContext(ctx).Omit("Customer").Create(&token).Error; err != nil {
+		return domain.AuthRefreshToken{}, mapGormError(err)
+	}
+	return token, nil
+}
+
+func (s *Store) GetAuthRefreshTokenByHash(ctx context.Context, tokenHash string) (domain.AuthRefreshToken, error) {
+	var token domain.AuthRefreshToken
+	err := s.db.WithContext(ctx).First(&token, "token_hash = ?", tokenHash).Error
+	if err != nil {
+		return domain.AuthRefreshToken{}, mapGormError(err)
+	}
+	return token, nil
+}
+
+func (s *Store) RotateAuthRefreshToken(ctx context.Context, currentID string, next domain.AuthRefreshToken, usedAt time.Time, ip string, userAgent string) (domain.AuthRefreshToken, error) {
+	var rotated domain.AuthRefreshToken
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var current domain.AuthRefreshToken
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&current, "id = ?", currentID).Error; err != nil {
+			return mapGormError(err)
+		}
+		if !current.Enabled || current.RevokedAt != nil {
+			return ErrInvalid
+		}
+
+		var err error
+		if next.ID == "" {
+			next.ID, err = security.NewID()
+			if err != nil {
+				return err
+			}
+		}
+		if next.PrincipalType == "" {
+			next.PrincipalType = current.PrincipalType
+		}
+		if next.Subject == "" {
+			next.Subject = current.Subject
+		}
+		if next.CustomerID == nil && current.CustomerID != nil {
+			customerID := *current.CustomerID
+			next.CustomerID = &customerID
+		}
+		if next.TokenHash == "" || next.SessionVersion == "" || next.ExpiresAt.IsZero() {
+			return ErrInvalid
+		}
+		if next.PrincipalType != security.PrincipalTypeAdmin && next.PrincipalType != security.PrincipalTypeCustomer {
+			return ErrInvalid
+		}
+		if next.PrincipalType == security.PrincipalTypeCustomer && next.CustomerID == nil {
+			return ErrInvalid
+		}
+		if next.PrincipalType == security.PrincipalTypeAdmin && next.CustomerID != nil {
+			return ErrInvalid
+		}
+		next.Enabled = true
+
+		now := usedAt.UTC()
+		current.Enabled = false
+		current.LastUsedAt = &now
+		current.LastUsedIP = ip
+		current.LastUsedUserAgent = userAgent
+		current.RevokedAt = &now
+		current.ReplacedByID = next.ID
+		if err := tx.Model(&domain.AuthRefreshToken{}).Where("id = ?", current.ID).Updates(map[string]any{
+			"enabled":              current.Enabled,
+			"last_used_at":         current.LastUsedAt,
+			"last_used_ip":         current.LastUsedIP,
+			"last_used_user_agent": current.LastUsedUserAgent,
+			"revoked_at":           current.RevokedAt,
+			"replaced_by_id":       current.ReplacedByID,
+		}).Error; err != nil {
+			return mapGormError(err)
+		}
+
+		if err := tx.Omit("Customer").Create(&next).Error; err != nil {
+			return mapGormError(err)
+		}
+		rotated = next
+		return nil
+	})
+	return rotated, err
+}
+
+func (s *Store) RevokeAuthRefreshTokenByHash(ctx context.Context, tokenHash string, revokedAt time.Time, ip string, userAgent string) error {
+	now := revokedAt.UTC()
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var token domain.AuthRefreshToken
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&token, "token_hash = ?", tokenHash).Error; err != nil {
+			if errors.Is(mapGormError(err), ErrNotFound) {
+				return nil
+			}
+			return mapGormError(err)
+		}
+		if token.RevokedAt != nil {
+			return nil
+		}
+		return mapGormError(tx.Model(&domain.AuthRefreshToken{}).Where("id = ?", token.ID).Updates(map[string]any{
+			"enabled":              false,
+			"last_used_at":         &now,
+			"last_used_ip":         ip,
+			"last_used_user_agent": userAgent,
+			"revoked_at":           &now,
+		}).Error)
+	})
+	return err
+}
+
+func (s *Store) RevokeCustomerAuthRefreshTokens(ctx context.Context, customerID string, revokedAt time.Time, ip string, userAgent string) (int64, error) {
+	return s.revokeAuthRefreshTokens(ctx, revokedAt, ip, userAgent, "principal_type = ? AND customer_id = ? AND revoked_at IS NULL", security.PrincipalTypeCustomer, customerID)
+}
+
+func (s *Store) RevokeAdminAuthRefreshTokens(ctx context.Context, revokedAt time.Time, ip string, userAgent string) (int64, error) {
+	return s.revokeAuthRefreshTokens(ctx, revokedAt, ip, userAgent, "principal_type = ? AND revoked_at IS NULL", security.PrincipalTypeAdmin)
+}
+
+func (s *Store) revokeAuthRefreshTokens(ctx context.Context, revokedAt time.Time, ip string, userAgent string, query string, args ...any) (int64, error) {
+	now := revokedAt.UTC()
+	updates := map[string]any{
+		"enabled":              false,
+		"last_used_at":         &now,
+		"last_used_ip":         ip,
+		"last_used_user_agent": userAgent,
+		"revoked_at":           &now,
+	}
+	result := s.db.WithContext(ctx).Model(&domain.AuthRefreshToken{}).Where(query, args...).Updates(updates)
+	if err := mapGormError(result.Error); err != nil {
+		return 0, err
+	}
+	return result.RowsAffected, nil
 }
 
 func (s *Store) CreateProxyNode(ctx context.Context, node domain.ProxyNode) (domain.ProxyNode, error) {

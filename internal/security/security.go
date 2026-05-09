@@ -20,6 +20,9 @@ import (
 const defaultPBKDF2Iterations = 260_000
 const databaseEncryptionKeyBytes = 32
 const encryptedStringVersion = "v1"
+const PrincipalTypeAdmin = "admin"
+const PrincipalTypeCustomer = "customer"
+const PrincipalSubjectConfiguredAdmin = "configured-admin"
 
 func NewID() (string, error) {
 	var b [16]byte
@@ -48,6 +51,15 @@ func NewRandomToken() (string, error) {
 func TokenDigest(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
+}
+
+func AuthSessionVersion(secretKey string, parts ...string) string {
+	mac := hmac.New(sha256.New, []byte(secretKey))
+	for _, part := range parts {
+		mac.Write([]byte{0})
+		mac.Write([]byte(part))
+	}
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 func ParseDatabaseEncryptionKey(value string) ([]byte, error) {
@@ -173,22 +185,39 @@ func VerifyPassword(password string, stored string) bool {
 	return hmac.Equal(digest, expected)
 }
 
-type tokenPayload struct {
+type AccessClaims struct {
 	Subject   string `json:"sub"`
+	Role      string `json:"role"`
+	IssuedAt  int64  `json:"iat,omitempty"`
 	ExpiresAt int64  `json:"exp"`
 }
 
-func CreateAccessToken(subject string, secretKey string, ttl time.Duration) (string, error) {
-	header := map[string]string{"alg": "HS256", "typ": "JWT"}
-	payload := tokenPayload{
-		Subject:   subject,
-		ExpiresAt: time.Now().UTC().Add(ttl).Unix(),
+func (c AccessClaims) Actor() string {
+	if c.Role != "" && c.Subject != "" {
+		return c.Role + ":" + c.Subject
 	}
+	return c.Subject
+}
+
+func CreateAccessToken(claims AccessClaims, secretKey string, ttl time.Duration) (string, error) {
+	if claims.Subject == "" || claims.Role == "" {
+		return "", errors.New("access token subject and role are required")
+	}
+	if claims.Role != PrincipalTypeAdmin && claims.Role != PrincipalTypeCustomer {
+		return "", errors.New("unsupported access token role")
+	}
+	if claims.Role == PrincipalTypeAdmin && claims.Subject != PrincipalSubjectConfiguredAdmin {
+		return "", errors.New("admin access token requires configured admin subject")
+	}
+	now := time.Now().UTC()
+	header := map[string]string{"alg": "HS256", "typ": "JWT"}
+	claims.IssuedAt = now.Unix()
+	claims.ExpiresAt = now.Add(ttl).Unix()
 	headerJSON, err := json.Marshal(header)
 	if err != nil {
 		return "", err
 	}
-	payloadJSON, err := json.Marshal(payload)
+	payloadJSON, err := json.Marshal(claims)
 	if err != nil {
 		return "", err
 	}
@@ -197,31 +226,37 @@ func CreateAccessToken(subject string, secretKey string, ttl time.Duration) (str
 	return signingInput + "." + base64.RawURLEncoding.EncodeToString(signature), nil
 }
 
-func VerifyAccessToken(token string, secretKey string) (string, bool) {
+func VerifyAccessToken(token string, secretKey string) (AccessClaims, bool) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
-		return "", false
+		return AccessClaims{}, false
 	}
 	signingInput := parts[0] + "." + parts[1]
 	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil {
-		return "", false
+		return AccessClaims{}, false
 	}
 	if !hmac.Equal(signature, sign([]byte(signingInput), []byte(secretKey))) {
-		return "", false
+		return AccessClaims{}, false
 	}
 	payloadJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return "", false
+		return AccessClaims{}, false
 	}
-	var payload tokenPayload
-	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
-		return "", false
+	var claims AccessClaims
+	if err := json.Unmarshal(payloadJSON, &claims); err != nil {
+		return AccessClaims{}, false
 	}
-	if payload.Subject == "" || payload.ExpiresAt < time.Now().UTC().Unix() {
-		return "", false
+	if claims.Subject == "" || claims.Role == "" || claims.ExpiresAt < time.Now().UTC().Unix() {
+		return AccessClaims{}, false
 	}
-	return payload.Subject, true
+	if claims.Role != PrincipalTypeAdmin && claims.Role != PrincipalTypeCustomer {
+		return AccessClaims{}, false
+	}
+	if claims.Role == PrincipalTypeAdmin && claims.Subject != PrincipalSubjectConfiguredAdmin {
+		return AccessClaims{}, false
+	}
+	return claims, true
 }
 
 func sign(data []byte, secret []byte) []byte {
