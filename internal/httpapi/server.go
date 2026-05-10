@@ -72,6 +72,7 @@ func (s *Server) routes(router *gin.Engine) {
 	admin.POST("/subscription-tokens/:id/rotate", s.rotateSubscriptionToken)
 
 	admin.POST("/traffic-usage", s.recordTrafficUsage)
+	admin.GET("/traffic-usage/total", s.getTrafficUsageTotal)
 	admin.GET("/domain-access-logs", s.listDomainAccessLogs)
 	admin.POST("/domain-access-logs", s.recordDomainAccessLogs)
 	admin.GET("/domain-access-summary", s.summarizeDomainAccessLogs)
@@ -79,6 +80,7 @@ func (s *Server) routes(router *gin.Engine) {
 	customer := router.Group("/customer", s.requireCustomer())
 	customer.GET("/me", s.customerMe)
 	customer.GET("/subscription-tokens", s.customerSubscriptionTokens)
+	customer.GET("/traffic-usage/total", s.customerTrafficUsageTotal)
 }
 
 func redactingGinLogFormatter(param gin.LogFormatterParams) string {
@@ -465,12 +467,18 @@ func (s *Server) updateCustomer(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if (emailChanged || passwordChanged || statusChanged || expiresAtChanged) && !resetSessions {
+		if !resetCustomerSessionEpoch(c, &current) {
+			return
+		}
+		resetSessions = true
+	}
 	updated, err := s.store.UpdateCustomer(c.Request.Context(), current)
 	if handleStoreError(c, err) {
 		return
 	}
 	newLoginEnabled := customerCanLogin(updated, now) && updated.PasswordHash != ""
-	if emailChanged || passwordChanged || statusChanged || expiresAtChanged || resetSessions || (oldLoginEnabled && !newLoginEnabled) {
+	if resetSessions || (oldLoginEnabled && !newLoginEnabled) {
 		if _, err := s.store.RevokeCustomerAuthRefreshTokens(c.Request.Context(), updated.ID, now, clientIP(c), c.Request.UserAgent()); handleStoreError(c, err) {
 			return
 		}
@@ -1051,6 +1059,69 @@ func (s *Server) recordTrafficUsage(c *gin.Context) {
 	c.JSON(http.StatusCreated, usage)
 }
 
+func (s *Server) getTrafficUsageTotal(c *gin.Context) {
+	filter, ok := trafficUsageTotalFilterFromQuery(c)
+	if !ok {
+		return
+	}
+	total, err := s.store.TrafficUsageTotal(c.Request.Context(), filter)
+	if handleStoreError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, total)
+}
+
+func (s *Server) customerTrafficUsageTotal(c *gin.Context) {
+	customerID, ok := customerIDFromContext(c)
+	if !ok {
+		writeError(c, http.StatusUnauthorized, "invalid bearer token")
+		return
+	}
+	filter, ok := trafficUsageTotalFilterFromQuery(c)
+	if !ok {
+		return
+	}
+	filter.CustomerID = customerID
+	total, err := s.store.TrafficUsageTotal(c.Request.Context(), filter)
+	if handleStoreError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, total)
+}
+
+func trafficUsageTotalFilterFromQuery(c *gin.Context) (store.TrafficUsageTotalFilter, bool) {
+	filter := store.TrafficUsageTotalFilter{
+		CustomerID:     strings.TrimSpace(c.Query("customer_id")),
+		ProxyAccountID: strings.TrimSpace(c.Query("proxy_account_id")),
+	}
+	if sinceParam := strings.TrimSpace(c.Query("since")); sinceParam != "" {
+		value, err := parseTrafficUsageTotalDay(sinceParam)
+		if err != nil {
+			writeError(c, http.StatusBadRequest, "since must be YYYY-MM-DD")
+			return store.TrafficUsageTotalFilter{}, false
+		}
+		filter.Since = &value
+	}
+	if untilParam := strings.TrimSpace(c.Query("until")); untilParam != "" {
+		value, err := parseTrafficUsageTotalDay(untilParam)
+		if err != nil {
+			writeError(c, http.StatusBadRequest, "until must be YYYY-MM-DD")
+			return store.TrafficUsageTotalFilter{}, false
+		}
+		untilExclusive := value.AddDate(0, 0, 1)
+		filter.Until = &untilExclusive
+	}
+	if filter.Since != nil && filter.Until != nil && !filter.Until.After(*filter.Since) {
+		writeError(c, http.StatusBadRequest, "until must be the same day as since or later")
+		return store.TrafficUsageTotalFilter{}, false
+	}
+	return filter, true
+}
+
+func parseTrafficUsageTotalDay(value string) (time.Time, error) {
+	return time.Parse("2006-01-02", value)
+}
+
 type domainAccessLogBatchRequest struct {
 	Events []domainAccessLogEventRequest `json:"events"`
 
@@ -1534,13 +1605,20 @@ func patchCustomerSessionReset(c *gin.Context, fields map[string]json.RawMessage
 	if !reset {
 		return false, true
 	}
+	if !resetCustomerSessionEpoch(c, customer) {
+		return false, false
+	}
+	return true, true
+}
+
+func resetCustomerSessionEpoch(c *gin.Context, customer *domain.Customer) bool {
 	epoch, err := security.NewRandomToken()
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "could not reset sessions")
-		return false, false
+		return false
 	}
 	customer.SessionEpoch = epoch
-	return true, true
+	return true
 }
 
 func patchString(c *gin.Context, fields map[string]json.RawMessage, name string, target *string, nullable bool, nonEmpty bool) bool {

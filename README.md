@@ -357,7 +357,8 @@ force all admin sessions to log in again.
 Customer refresh tokens are bound to the customer id, email, password hash, and
 hidden `session_epoch`. Changing a customer's email, password, status, expiry,
 or PATCHing `{"reset_sessions":true}` invalidates that customer's existing
-refresh tokens.
+refresh tokens by bumping `session_epoch`; database revoke markers are kept for
+observability and cleanup.
 
 `PCP_DATABASE_ENCRYPTION_KEY` is required in server mode. It must be a
 base64-encoded 32-byte key, for example from `openssl rand -base64 32`. New
@@ -546,7 +547,12 @@ age retention only:
 - `traffic_usage`: 7 days
 - `traffic_usage_daily`: 30 days
 - `domain_access_logs`: 30 days
+- `auth_refresh_tokens`: 30 days after expiry or revocation
 - `audit_logs`: 90 days
+
+Traffic total APIs sum both retained sources: fresh `traffic_usage` detail rows
+and older `traffic_usage_daily` rows that have already been aggregated by
+maintenance cleanup.
 
 Run cleanup in dry-run mode first:
 
@@ -603,6 +609,7 @@ Customer login:
 - `POST /customer/login`
 - `GET /customer/me`
 - `GET /customer/subscription-tokens`
+- `GET /customer/traffic-usage/total`
 
 Customers:
 
@@ -640,9 +647,15 @@ Subscription tokens:
 Traffic:
 
 - `POST /admin/traffic-usage`
+- `GET /admin/traffic-usage/total`
 - `GET /admin/domain-access-logs`
 - `POST /admin/domain-access-logs`
 - `GET /admin/domain-access-summary`
+
+Traffic total endpoints accept optional `proxy_account_id`, `since`, and
+`until` query parameters. The admin endpoint also accepts `customer_id`.
+`since` and `until` are calendar-day boundaries in `YYYY-MM-DD` form; `since`
+is inclusive at 00:00 UTC and `until` includes that whole day.
 
 Client subscription:
 

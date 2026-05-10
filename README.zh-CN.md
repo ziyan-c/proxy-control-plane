@@ -324,7 +324,8 @@ refresh 都会返回新 refresh token，并撤销旧 refresh token。
 修改 `PCP_ADMIN_SESSION_EPOCH` 就可以。
 客户 refresh token 会绑定客户 id、邮箱、密码 hash 和隐藏的 `session_epoch`。
 修改客户邮箱、密码、状态、过期时间，或者 PATCH `{"reset_sessions":true}`，都会让
-这个客户已有 refresh token 失效。
+这个客户已有 refresh token 失效。实现上会刷新 `session_epoch`，数据库里的 revoke
+标记主要用于可观测性和后续清理。
 
 `PCP_DATABASE_ENCRYPTION_KEY` 是 server 模式必填的数据库敏感列加密密钥。它必须是
 base64 编码的 32 字节 key，可以用 `openssl rand -base64 32` 生成。新建的
@@ -503,7 +504,11 @@ git push origin v0.1.1
 - `traffic_usage`：7 天
 - `traffic_usage_daily`：30 天
 - `domain_access_logs`：30 天
+- `auth_refresh_tokens`：过期或撤销后 30 天
 - `audit_logs`：90 天
+
+流量总计接口会把两个保留中的来源相加：新鲜的 `traffic_usage` 明细，以及已经被
+maintenance cleanup 聚合过的旧 `traffic_usage_daily` 日汇总。
 
 先用 dry-run 看会影响多少数据：
 
@@ -556,6 +561,7 @@ git push origin v0.1.1
 - `POST /customer/login`
 - `GET /customer/me`
 - `GET /customer/subscription-tokens`
+- `GET /customer/traffic-usage/total`
 
 客户：
 
@@ -593,9 +599,14 @@ git push origin v0.1.1
 流量：
 
 - `POST /admin/traffic-usage`
+- `GET /admin/traffic-usage/total`
 - `GET /admin/domain-access-logs`
 - `POST /admin/domain-access-logs`
 - `GET /admin/domain-access-summary`
+
+流量总计接口支持可选的 `proxy_account_id`、`since`、`until` 查询参数。管理员接口还支持
+`customer_id`。`since` 和 `until` 都是 `YYYY-MM-DD` 这种自然日边界；`since`
+从当天 UTC 00:00 开始包含，`until` 会包含那一整天。
 
 客户端订阅：
 

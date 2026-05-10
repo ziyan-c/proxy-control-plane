@@ -267,6 +267,18 @@ func TestCustomerSessionVersionChangesWithEmailPasswordAndEpoch(t *testing.T) {
 	}
 }
 
+func TestResetCustomerSessionEpochChangesEpoch(t *testing.T) {
+	c, _ := requestContext(http.MethodPatch, "")
+	customer := domain.Customer{SessionEpoch: "old-epoch"}
+
+	if !resetCustomerSessionEpoch(c, &customer) {
+		t.Fatal("resetCustomerSessionEpoch failed")
+	}
+	if customer.SessionEpoch == "" || customer.SessionEpoch == "old-epoch" {
+		t.Fatalf("SessionEpoch = %q, want new non-empty value", customer.SessionEpoch)
+	}
+}
+
 func TestBytesFromTrafficUnitsAcceptsGB(t *testing.T) {
 	gb := 1.25
 	bytes, err := bytesFromTrafficUnits(nil, &gb, "upload")
@@ -283,6 +295,40 @@ func TestBytesFromTrafficUnitsRejectsMixedUnits(t *testing.T) {
 	gb := 1.0
 	if _, err := bytesFromTrafficUnits(&bytesValue, &gb, "upload"); err == nil {
 		t.Fatal("bytesFromTrafficUnits accepted mixed byte and GB fields")
+	}
+}
+
+func TestTrafficUsageTotalFilterFromQuery(t *testing.T) {
+	c, _ := requestContext(http.MethodGet, "")
+	c.Request = httptest.NewRequest(http.MethodGet, "/?customer_id=customer-1&proxy_account_id=account-1&since=2026-05-10&until=2026-05-11", nil)
+
+	filter, ok := trafficUsageTotalFilterFromQuery(c)
+	if !ok {
+		t.Fatal("trafficUsageTotalFilterFromQuery rejected valid query")
+	}
+	if filter.CustomerID != "customer-1" || filter.ProxyAccountID != "account-1" {
+		t.Fatalf("filter ids = %+v", filter)
+	}
+	if filter.Since == nil || filter.Until == nil {
+		t.Fatalf("filter times = %+v", filter)
+	}
+	if !filter.Since.Equal(time.Date(2026, 5, 10, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("since = %s", filter.Since)
+	}
+	if !filter.Until.Equal(time.Date(2026, 5, 12, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("until = %s, want exclusive next day after until date", filter.Until)
+	}
+}
+
+func TestTrafficUsageTotalFilterRejectsTimestampBoundary(t *testing.T) {
+	c, recorder := requestContext(http.MethodGet, "")
+	c.Request = httptest.NewRequest(http.MethodGet, "/?since=2026-05-10T12:00:00Z", nil)
+
+	if _, ok := trafficUsageTotalFilterFromQuery(c); ok {
+		t.Fatal("trafficUsageTotalFilterFromQuery accepted timestamp boundary")
+	}
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
 	}
 }
 

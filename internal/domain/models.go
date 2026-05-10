@@ -191,6 +191,30 @@ func (t TrafficUsageDaily) MarshalJSON() ([]byte, error) {
 	})
 }
 
+type TrafficUsageTotal struct {
+	CustomerID     string `json:"customer_id,omitempty"`
+	ProxyAccountID string `json:"proxy_account_id,omitempty"`
+	UploadBytes    int64  `json:"upload_bytes"`
+	DownloadBytes  int64  `json:"download_bytes"`
+}
+
+func (t TrafficUsageTotal) MarshalJSON() ([]byte, error) {
+	type Alias TrafficUsageTotal
+	return json.Marshal(struct {
+		Alias
+		TotalBytes int64   `json:"total_bytes"`
+		UploadGB   float64 `json:"upload_gb"`
+		DownloadGB float64 `json:"download_gb"`
+		TotalGB    float64 `json:"total_gb"`
+	}{
+		Alias:      Alias(t),
+		TotalBytes: t.UploadBytes + t.DownloadBytes,
+		UploadGB:   BytesToGB(t.UploadBytes),
+		DownloadGB: BytesToGB(t.DownloadBytes),
+		TotalGB:    BytesToGB(t.UploadBytes + t.DownloadBytes),
+	})
+}
+
 type RuntimeUser struct {
 	ProxyAccountID string `json:"proxy_account_id,omitempty"`
 	Email          string `json:"email"`
